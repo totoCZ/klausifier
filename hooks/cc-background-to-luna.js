@@ -8,7 +8,9 @@
 // IMPORTANT: Only intercept requests where model is one of the three tiers (luna/terra/sol).
 // If a model comes in directly (e.g., antigravity/gemini-3.1-flash-lite), leave it untouched.
 
-// Get the requested model from the request
+// OmniRoute exposes the incoming request body on context.body. Do not use an
+// ambient `b` binding here: it is not the request body in every hook runtime.
+var b = context.body || {};
 var requestedModel = b.model || "";
 
 // Only intercept if the model is one of the three tiers
