@@ -1,4 +1,6 @@
-# OmniRoute Traffic Router
+# OmniRoute Traffic Router - klausifier
+
+![logo](contrib/logo.jpg)
 
 Route AI coding agents' background requests to cheaper models without logging traffic or rebuilding the gateway.
 
