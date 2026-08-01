@@ -5,9 +5,19 @@
 //                                                (a combo-ref back to the origin:
 //                                                 same backends/load balancer, but
 //                                                 comboName records it as unknown)
-// No logging. Routing IS the classification record — call-log comboName distinguishes
-// unknown-<origin> from a matched main turn on the same origin.
-var b = context.body || {};
+// IMPORTANT: Only intercept requests where model is one of the three tiers (luna/terra/sol).
+// If a model comes in directly (e.g., antigravity/gemini-3.1-flash-lite), leave it untouched.
+
+// Get the requested model from the request
+var requestedModel = b.model || "";
+
+// Only intercept if the model is one of the three tiers
+var TIER_MODELS = ["luna", "terra", "sol"];
+if (TIER_MODELS.indexOf(requestedModel) === -1) {
+  // Model is not one of our tiers - leave it untouched
+  return {};
+}
+
 var raw = b.system;
 var sys = "";
 if (typeof raw === "string") {
