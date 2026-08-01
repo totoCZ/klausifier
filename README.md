@@ -1,11 +1,8 @@
-# omniroute-traffic-router
+# OmniRoute Traffic Router
 
-Route an AI coding agent's background requests away from premium models — **without
-logging and without recompiling the gateway** — using only runtime middleware hooks.
+Route AI coding agents' background requests to cheaper models without logging traffic or rebuilding the gateway.
 
-Built for [OmniRoute](https://github.com/diegosouzapw/OmniRoute) and Claude Code, but
-the mechanism is general. This README explains the idea so you can adapt it to any
-gateway that exposes a pre-request hook.
+Built for [OmniRoute](https://github.com/diegosouzapw/OmniRoute) and Claude Code, using a runtime pre-request hook. The same pattern works with any gateway that can inspect and rewrite requests before model selection.
 
 > **事半功倍** — *shì bàn gōng bèi* — "Half the effort, twice the result."
 >
@@ -13,217 +10,115 @@ gateway that exposes a pre-request hook.
 > combo — so it cost roughly half the effort and a fraction of the price. Have a super
 > efficient day! (｡◕‿◕｡))
 
----
+## Why this exists
 
-## The problem
+Claude Code sends more than its main coding request. Background traffic includes:
 
-AI coding agents (Claude Code, Cursor, etc.) don't only send the "main" thinking
-request. On every turn they also fire cheap background calls:
+- conversation titles
+- git branch names
+- permission and security checks
+- context summaries
 
-- **conversation title generation** — one tiny prompt
-- **git branch name generation** — one tiny prompt
-- **permission/security classifier** — "is this tool call safe?" before every action
-- **conversation summaries / context compaction** — periodically
+OmniRoute's built-in Background Task Degradation currently misses Claude Code's native Anthropic request format: the system prompt is in top-level `body.system`, not in a `messages[]` system entry.
 
-These are low-stakes, and they all burn the same premium model your real work uses.
-On a busy day they're easily 20–40% of your request volume.
+This hook runs before routing, reads the full system prompt, and redirects known background requests:
 
-OmniRoute ships a "Background Task Degradation" feature meant to auto-route these to
-a cheaper model. It's **buggy**: its detector only scans the OpenAI-style
-`messages[]` for a `role:"system"` entry. Claude Code uses the native Anthropic
-format, where the system prompt is the top-level `body.system` field — no
-system-role message exists — so the detector never matches and nothing is routed.
-
-## The fix: a pre-request hook that routes by system prompt
-
-OmniRoute exposes a **pre-request middleware hook** system: arbitrary JS, registered
-via an internal API, that runs on every request *before* combo/backend selection and
-can return `{ model: "..." }` to redirect. The hook sees the full, un-truncated
-`body.system`.
-
-So the redirector is ~30 lines of JS: normalize `body.system` (string or array of
-text blocks), substring-match the known background markers, and return a cheaper
-combo.
-
-```
-request → model resolves to combo → HOOKS RUN (see full body.system) → combo/backend selected → execute
+```text
+request → hook → model/combo selection → backend
 ```
 
-### Why a hook and not a config edit?
+## How it works
 
-- **Runtime only.** No TS recompile, no image rebuild, survives restarts (hooks are
-  persisted in the gateway's DB and reloaded at boot).
-- **Sees the real request.** The hook runs on the live body *before* logging.
-  Call logs truncate the body at 8KB and strip the system prompt on ~92% of requests
-  — so any tool that classifies from logs is blind. The hook is the only place the
-  full system prompt exists.
-- **No logging.** The routing decision itself is the record (see below).
+The hook normalizes `body.system` (string or text blocks) and matches stable system-prompt markers:
 
----
+| Request | Destination |
+| --- | --- |
+| Security classifier | `security` |
+| Title or branch generation | `cheap` |
+| Main Claude Code turn | unchanged |
+| Unrecognized request | `unknown-<origin>` sentinel |
 
-## The tricky part: how do you find traffic you *haven't* matched yet?
+Sentinel combos point back to the original combo, so behavior and cost stay the same while `summary.comboName` records that the request was unmatched. This makes discovery possible without adding logging.
 
-You want to discover new background patterns to route. But:
+| `comboName` | Meaning |
+| --- | --- |
+| `security` / `cheap` | Matched background request; routed off premium |
+| `unknown-luna` / `unknown-terra` / `unknown-sol` | Unmatched request to inspect |
+| `luna` / `terra` / `sol` | Matched main request |
 
-- Reading call logs doesn't work — the system prompt is truncated away on most.
-- Adding a logging hook works, but adds log volume you may not want.
-- And `comboName` on the log doesn't distinguish a *missed* background request from
-  a real main turn — both land on the same premium combo.
+## Repository contents
 
-### The sentinel-combo trick
-
-A request is "unknown" precisely when it matched no known marker. The hook's final
-fallback — instead of a no-op — routes unknowns to a **per-origin sentinel combo**:
-
-```js
-// matched main turn    → return {} (stay on its real combo)
-// matched background   → return { model: "cheap" | "security" }
-// anything else        → return { model: "unknown-" + context.combo }   ← the trick
+```text
+hooks/cc-background-to-luna.js  Runtime redirect hook
+classify.py                     Live call-log watcher
 ```
 
-`unknown-luna`, `unknown-terra`, etc. are **combo-refs**: each points right back to
-its origin (`unknown-luna` → `luna`'s backends). So:
-
-- **Behavior is identical** — same backends, same load balancer, same cost.
-- **But `comboName` now records the classification.** A request on `terra` is
-  provably a matched main turn; a request on `unknown-terra` is provably unmatched.
-
-Now `comboName` fully classifies traffic, survives the 8KB truncation (it's in the
-`summary` block, not the body), and requires **zero logging**:
-
-| `comboName`              | meaning                          |
-|--------------------------|----------------------------------|
-| `security` / `cheap`     | matched background → off premium |
-| `unknown-luna/terra/sol` | **unmatched** (worth eyeballing) |
-| `luna` / `terra` / `sol` | matched main turn                |
-
-Run the watcher (`classify.py`) and you see exactly the unmatched requests stream
-by, with a snippet when the body wasn't truncated. When you spot a recurring one,
-add its marker to the hook — it moves off premium and stops showing as unknown.
-
-### Why no recursion?
-
-Combo-refs are a single-level pointer resolved *after* hooks run. Hooks fire exactly
-once per request; returning `{model:"unknown-terra"}` changes the model string, which
-changes which combo is selected, and that combo happens to reference `terra`'s
-backends. The hook chain is never re-entered. (The existing `security`/`cheap`
-combos are already refs to `luna` and have fired thousands of times with no loop.)
-
----
-
-## What's in this repo
-
-```
-hooks/
-  cc-background-to-luna.js   the redirect hook (routes background + sentinels unknowns)
-classify.py                  pure-Python live watcher (reads comboName, no marker logic)
-```
-
-`classify.py` does **not** re-derive any routing logic. It only reads
-`summary.comboName` and labels it — the hook already did the classification at
-request time. That separation is deliberate: one source of truth (the hook's
-markers), no duplication.
-
-### Run the watcher
+`classify.py` reads the hook's routing result from `summary.comboName`; it does not duplicate the marker logic.
 
 ```sh
-python3 classify.py            # live, unknowns only
-python3 classify.py --all      # every request with its label
+python3 classify.py            # show unmatched requests
+python3 classify.py --all      # show every request
+python3 classify.py --log-root /path/to/call_logs
 ```
 
-It watches OmniRoute's call-log directory directly (the files persist one JSON per
-request under `DATA_DIR/call_logs/YYYY-MM-DD/`). Point it at yours with
-`--log-root` or `$OMNIROUTE_CALL_LOGS`.
+The watcher reads OmniRoute's `DATA_DIR/call_logs/YYYY-MM-DD/` directory. Use `--log-root` or `OMNIROUTE_CALL_LOGS` to point it elsewhere.
 
----
+## Setup
 
-## Setting it up on OmniRoute
+### 1. Create combo references
 
-OmniRoute's hook API has no dashboard UI — it's API-only.
+Create these combos once, through the UI or `POST /api/combos`. Each combo references the origin combo's backends:
 
-**1. Create the sentinel combos** (one-off, via the UI or `POST /api/combos`).
-Each is a combo-ref back to an origin combo — same backends, just a label:
+| Combo | Refers to | Purpose |
+| --- | --- | --- |
+| `security` | `luna` | Security-classifier target |
+| `cheap` | `luna` | Title/branch target |
+| `unknown-luna` | `luna` | Unmatched sentinel |
+| `unknown-terra` | `terra` | Unmatched sentinel |
+| `unknown-sol` | `sol` | Unmatched sentinel |
 
-| combo           | refers to | purpose                      |
-|-----------------|-----------|------------------------------|
-| `security`      | `luna`    | security-classifier target   |
-| `cheap`         | `luna`     | title/branch target          |
-| `unknown-luna`  | `luna`    | sentinel: unmatched, on luna |
-| `unknown-terra` | `terra`   | sentinel: unmatched, on terra|
-| `unknown-sol`   | `sol`     | sentinel: unmatched, on sol  |
+Use your preferred low-cost combo for `security` and `cheap`; `luna` is only an example.
 
-Point `security`/`cheap` at whatever your cheap tier is (not necessarily luna).
+### 2. Install the hook
 
-**2. Install the hook:**
+Run from inside the OmniRoute container:
 
 ```sh
-# From inside the container (avoids escaping the code string):
 curl -s -X POST http://localhost/api/middleware/hooks \
   -H 'Content-Type: application/json' \
-  -d "$(node -e 'const fs=require("fs");
+  -d "$(node -e 'const fs=require(\"fs\");
     process.stdout.write(JSON.stringify({
-      name:"cc-background-to-luna", priority:100, enabled:true,
-      code: fs.readFileSync("hooks/cc-background-to-luna.js","utf8")
+      name:\"cc-background-to-luna\", priority:100, enabled:true,
+      code: fs.readFileSync(\"hooks/cc-background-to-luna.js\",\"utf8\")
     }))')"
 ```
 
-`GET /api/middleware/hooks` to verify; `PUT …/hooks/cc-background-to-luna` to update.
+Verify with `GET /api/middleware/hooks`. Update with `PUT …/hooks/cc-background-to-luna`.
 
-**3. Watch and refine.** Run `classify.py`. Add new background markers to the hook's
-`CHEAP_MARKERS`/`SECURITY_MARKERS` as unknowns surface; re-PUT. Matched traffic
-moves off premium and out of the unknown bucket.
+### 3. Watch and refine
 
----
+Run `classify.py` while using Claude Code. When a recurring request appears under `unknown-*`, add its system-prompt marker to `CHEAP_MARKERS` or `SECURITY_MARKERS`, then update the hook.
 
-## Adapting to other gateways / agents
+## Adapting the pattern
 
-The pattern transfers to anything with a pre-request interception point:
+For another agent or gateway:
 
-1. **Find the interception point.** You need somewhere that runs on every request,
-   sees the full request body (system prompt included), *before* model/backend
-   selection, and can alter the routing decision. Examples: an API gateway plugin
-   (Kong, Caddy, Envoy), a LiteLLM proxy callback, an OpenAI-compatible proxy with
-   middleware, a reverse-proxy (nginx/caddy) Lua/header route, or a thin app-layer
-   shim.
+1. Find a pre-request interception point with access to the complete body.
+2. Match stable background system-prompt markers and redirect them.
+3. Route unmatched requests to a sentinel target that resolves to the original route.
+4. Use the persisted routing outcome as your discovery feed.
 
-2. **Match, then redirect.** Normalize the system prompt (string vs array-of-blocks
-   differs by API format), substring/regex-match your agent's background markers,
-   and rewrite the target model/endpoint. Known markers for Claude Code are in the
-   hook here; other agents have their own (grep their shipped prompts).
+Possible interception points include gateway middleware, LiteLLM callbacks, reverse-proxy plugins, and application-level shims.
 
-3. **For discovery, mark instead of log.** If your proxy supports indirection
-   (named target that resolves to the real one — OmniRoute's combo-refs, LiteLLM
-   model aliases, a routing group), route unknowns to a sentinel target that
-   resolves back to the origin. The routing outcome then doubles as a classification
-   record with no added log volume. If it doesn't, a light "unmatched" counter or a
-   sampled log line is the fallback — but the sentinel trick is what makes it
-   zero-overhead.
+Claude Code markers used here:
 
-4. **Read the record.** Whatever persists the routing outcome (call logs, access
-   logs, metrics) is your recon feed — filter for the sentinel target.
-
-### Markers to look for
-
-Claude Code's background prompts are identifiable by stable system-prompt prefixes
-(the hook matches these):
-
-- security classifier → `"You are a security monitor for autonomous AI coding agents"`
-- title → `"Generate a concise, sentence-case title"`
-- branch name → `"Generate a short kebab-case name"`
-- main turn → `"You are Claude Code, Anthropic's official CLI"` (must *not* be routed)
-
-Other agents differ; capture a few requests and read the system prompts to find yours.
-
----
+- Security: `You are a security monitor for autonomous AI coding agents`
+- Title: `Generate a concise, sentence-case title`
+- Branch: `Generate a short kebab-case name`
+- Main turn: `You are Claude Code, Anthropic's official CLI` (never redirect)
 
 ## Notes
 
-- This is a workaround. If OmniRoute fixes the built-in Background Task Degradation
-  to read `body.system`, the built-in feature can take over and the background
-  routing part of the hook can be removed. The sentinel/unknown mechanism is still
-  useful for ongoing discovery.
-- The hook's `runCount` API field is unreliable on OmniRoute (a module-graph
-  duplication bug shows `0` even while it fires). Verify via the routing outcome
-  (requests landing on `security`/`cheap`/`unknown-*`) rather than the counter.
-- Subagents (Claude Agent SDK) are deliberately **not** routed — they do real work
-  and stay on their original combo. Review and decide for your setup.
+- This is a workaround for OmniRoute's current background-task detector. If it learns to inspect `body.system`, the background-routing portion of this hook may no longer be needed.
+- OmniRoute's hook `runCount` field is unreliable; verify behavior through routing outcomes instead.
+- Claude Agent SDK subagents are intentionally left on their original combo because they perform real work.
