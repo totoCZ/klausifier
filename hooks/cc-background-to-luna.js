@@ -30,16 +30,11 @@ if (typeof raw === "string") {
   sys = sys.toLowerCase();
 }
 
-// Known main coding turn — must be checked first so it never falls to the unknown
-// bucket. Return {} = no-op, stays on its original combo.
-if (sys.indexOf("you are claude code, anthropic's official cli") !== -1) {
-  return {};
-}
-// Subagents do real work — deliberately left untouched.
-if (sys.indexOf("you are a claude agent, built on anthropic's claude agent sdk") !== -1) {
-  return {};
-}
-
+// Background-task markers are checked BEFORE the no-op shields below. The
+// security monitor is itself a Claude Agent SDK subagent, so its full system
+// prompt carries the SDK identity line — if the SDK no-op ran first it would
+// shield the security monitor and leave it on a premium combo. These markers
+// are unambiguous (never in a real main turn), so they must win.
 var SECURITY_MARKERS = [
   "you are a security monitor for autonomous ai coding agents"
 ];
@@ -56,6 +51,17 @@ for (var i = 0; i < CHEAP_MARKERS.length; i++) {
   if (sys.indexOf(CHEAP_MARKERS[i]) !== -1) {
     return { model: "cheap" };
   }
+}
+
+// Known main coding turn — must be checked before the unknown bucket so it never
+// gets rerouted. Return {} = no-op, stays on its original combo.
+if (sys.indexOf("you are claude code, anthropic's official cli") !== -1) {
+  return {};
+}
+// Working subagents do real work — deliberately left untouched. (Background
+// subagents like the security monitor were already routed above.)
+if (sys.indexOf("you are a claude agent, built on anthropic's claude agent sdk") !== -1) {
+  return {};
 }
 
 // Unknown — route to a per-origin sentinel combo. context.combo is the resolved
