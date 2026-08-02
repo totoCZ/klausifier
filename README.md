@@ -2,9 +2,12 @@
 
 ![logo](contrib/logo.jpg)
 
-Route AI coding agents' background requests to cheaper models without logging traffic or rebuilding the gateway.
+Route Claude Code and Codex CLI traffic through [OmniRoute](https://github.com/diegosouzapw/OmniRoute) without logging prompt contents or rebuilding the gateway.
 
-Built for [OmniRoute](https://github.com/diegosouzapw/OmniRoute), Claude Code, and Codex CLI, using a runtime pre-request hook. The same pattern works with any gateway that can inspect and rewrite requests before model selection.
+The live middleware hook distinguishes recognized background work from normal
+coding turns. Its routing result is also the discovery record: unmatched tier
+requests land on an `unknown-<tier>` combo, while normal requests keep their
+original model selection.
 
 > **事半功倍** — *shì bàn gōng bèi* — "Half the effort, twice the result."
 >
@@ -12,24 +15,34 @@ Built for [OmniRoute](https://github.com/diegosouzapw/OmniRoute), Claude Code, a
 > combo — so it cost roughly half the effort and a fraction of the price. Have a super
 > efficient day! (｡◕‿◕｡))
 
-## Why this exists
+## Clients and behavior
 
-Claude Code sends more than its main coding request. Background traffic includes:
+Both clients use the tier routing models `luna`, `terra`, and `sol`. The hook
+only acts on those tier names in `context.model`; direct provider model IDs and
+other combo names remain untouched.
 
-- conversation titles
-- git branch names
-- permission and security checks
-- context summaries
+| Client | Request prompt field | Recognized traffic | Routing behavior |
+| --- | --- | --- | --- |
+| Claude Code | `body.system` | Security monitor, title generation, branch naming | Routes known background work to `security` or `cheap`; main turns and working SDK subagents stay on their selected tier. |
+| Codex CLI | `body.instructions` | Normal coding-agent instruction prefix | Normal coding turns stay on their selected tier; unmatched tier traffic is visible through `unknown-<tier>`. |
+| Codex auto review | Review request selected as `codex-auto-review` | Security-policy action review | Configure `codex-auto-review` as its own combo; it is not rewritten by this hook. |
 
-OmniRoute's built-in Background Task Degradation currently misses Claude Code's native Anthropic request format: the system prompt is in top-level `body.system`, not in a `messages[]` system entry.
+Codex auto review is distinct from Claude Code's `security` classifier. The
+former evaluates planned coding-agent actions using its review prompt; the
+latter is Claude Code background traffic detected by this hook. Keep their
+combos separate so the review workload can use an appropriate model and remain
+observable as `codex-auto-review` in OmniRoute call logs.
 
-This hook runs before routing, reads the full system prompt, and redirects known background requests:
+Claude Code uses the Anthropic request format, with its system prompt in
+top-level `body.system` instead of a `messages[]` system entry. Codex CLI uses
+the Responses API-style `body.instructions` field. The hook normalizes both
+fields before matching markers:
 
 ```text
 request → hook → model/combo selection → backend
 ```
 
-## How it works
+## Routing model
 
 The hook gates on OmniRoute's `context.model` routing model, then normalizes
 Claude Code's `context.body.system` (string or text blocks) and Codex CLI's
@@ -39,18 +52,21 @@ validated routing model rather than `context.combo`.
 
 | Request | Destination |
 | --- | --- |
-| Security classifier | `security` |
-| Title or branch generation | `cheap` |
-| Main Claude Code or Codex CLI turn | unchanged |
-| Unrecognized request | `unknown-<origin>` sentinel |
+| Claude Code security classifier | `security` |
+| Claude Code title or branch generation | `cheap` |
+| Claude Code main turn or working SDK subagent | unchanged |
+| Codex CLI normal coding turn | unchanged |
+| Codex auto review | `codex-auto-review` (client-selected combo) |
+| Other unrecognized tier request | `unknown-<origin>` sentinel |
 
 Sentinel combos point back to the original combo, so behavior and cost stay the same while `summary.comboName` records that the request was unmatched. This makes discovery possible without adding logging.
 
 | `comboName` | Meaning |
 | --- | --- |
-| `security` / `cheap` | Matched background request; routed off premium |
+| `security` / `cheap` | Matched Claude Code background request; routed off premium |
+| `codex-auto-review` | Codex security-policy review, selected independently of this hook |
 | `unknown-luna` / `unknown-terra` / `unknown-sol` | Unmatched request to inspect |
-| `luna` / `terra` / `sol` | Matched main request |
+| `luna` / `terra` / `sol` | Normal recognized main coding request |
 
 ## Repository contents
 
@@ -83,8 +99,11 @@ Create these combos once, through the UI or `POST /api/combos`. Each combo refer
 | `unknown-luna` | `luna` | Unmatched sentinel |
 | `unknown-terra` | `terra` | Unmatched sentinel |
 | `unknown-sol` | `sol` | Unmatched sentinel |
+| `codex-auto-review` | Your chosen review model or combo | Codex security-policy review target |
 
-Use your preferred low-cost combo for `security` and `cheap`; `luna` is only an example.
+Use your preferred low-cost combo for `security` and `cheap`; configure
+`codex-auto-review` with a model suitable for security-policy reasoning. `luna`
+is only an example target for the low-cost Claude Code background combos.
 
 ### 2. Install the hook
 
@@ -104,7 +123,11 @@ Verify with `GET /api/middleware/hooks`. Update with `PUT …/hooks/cc-backgroun
 
 ### 3. Watch and refine
 
-Run `classify.py` while using Claude Code or Codex CLI. When a recurring request appears under `unknown-*`, add its prompt marker to `CHEAP_MARKERS` or `SECURITY_MARKERS`, then update the hook.
+Run `classify.py` while using either client. When a recurring Claude Code
+background request appears under `unknown-*`, add its prompt marker to
+`CHEAP_MARKERS` or `SECURITY_MARKERS`, then update the hook. For Codex, confirm
+normal turns remain on `luna`, `terra`, or `sol`, and confirm policy-review
+requests land on `codex-auto-review`.
 
 ## Adapting the pattern
 
@@ -130,6 +153,7 @@ Codex CLI marker used here:
 
 ## Notes
 
-- This is a workaround for OmniRoute's current background-task detector. If it learns to inspect `body.system`, the background-routing portion of this hook may no longer be needed.
+- This is a workaround for OmniRoute's current background-task detector. If it learns to inspect `body.system`, the Claude Code background-routing portion of this hook may no longer be needed.
 - OmniRoute's hook `runCount` field is unreliable; verify behavior through routing outcomes instead.
 - Claude Agent SDK subagents are intentionally left on their original combo because they perform real work.
+- `codex-auto-review` must exist as an OmniRoute combo before Codex sends review traffic to it; the hook neither creates nor redirects to that combo.

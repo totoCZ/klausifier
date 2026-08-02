@@ -70,6 +70,11 @@ expect(
   {}
 );
 expect(
+  "Codex auto-review combo remains independent of the tier hook",
+  codexContext("codex-auto-review", "provider/model", "You are judging one planned coding-agent action."),
+  {}
+);
+expect(
   "body model remains a compatibility fallback",
   { body: { model: "luna", system: KEBAB } },
   { model: "cheap" }
