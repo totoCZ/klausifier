@@ -70,7 +70,10 @@ updates.
    incus exec omniroute -- curl -s http://localhost/api/middleware/hooks
    ```
 
-The hook must only intercept the tier model names `luna`, `terra`, and `sol`.
-Direct provider model IDs such as `antigravity/gemini-3.1-flash-lite` must return
-`{}` from the hook and remain untouched. The API update is live immediately; a
-container restart is not required.
+The hook must only intercept requests whose routing model (`context.model`) is
+one of the tier names `luna`, `terra`, or `sol`. The request body may already carry
+a resolved provider ID in `context.body.model`; use `context.body.system` only for
+classification. Combo resolution happens after this hook, so `context.combo` is
+not a reliable origin here. Direct provider model IDs such as
+`antigravity/gemini-3.1-flash-lite` must return `{}` and remain untouched. The API
+update is live immediately; a container restart is not required.

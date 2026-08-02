@@ -11,12 +11,14 @@
 // OmniRoute exposes the incoming request body on context.body. Do not use an
 // ambient `b` binding here: it is not the request body in every hook runtime.
 var b = context.body || {};
-var requestedModel = b.model || "";
+// The hook runs before combo resolution. context.model is the routing model the
+// client requested; body.model may already contain the selected provider model.
+var requestedModel = context.model || b.model || "";
 
-// Only intercept if the model is one of the three tiers
+// Only intercept if the requested routing model is one of the three tiers.
 var TIER_MODELS = ["luna", "terra", "sol"];
 if (TIER_MODELS.indexOf(requestedModel) === -1) {
-  // Model is not one of our tiers - leave it untouched
+  // A direct provider model ID must remain untouched.
   return {};
 }
 
@@ -66,9 +68,7 @@ if (sys.indexOf("you are a claude agent, built on anthropic's claude agent sdk")
   return {};
 }
 
-// Unknown — route to a per-origin sentinel combo. context.combo is the resolved
-// origin (luna/terra/sol); unknown-<origin> is a combo-ref back to it, so behavior
-// is identical but comboName marks the request as unmatched. Fallback "luna" if
-// no combo resolved.
-var origin = context.combo || "luna";
-return { model: "unknown-" + origin };
+// Unknown — route to a per-origin sentinel combo. The tier gate validated the
+// requested routing model above, so it is the origin even though combo resolution
+// has not happened yet.
+return { model: "unknown-" + requestedModel };

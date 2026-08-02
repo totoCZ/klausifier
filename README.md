@@ -31,7 +31,10 @@ request → hook → model/combo selection → backend
 
 ## How it works
 
-The hook normalizes `body.system` (string or text blocks) and matches stable system-prompt markers:
+The hook gates on OmniRoute's `context.model` routing model, then normalizes
+`context.body.system` (string or text blocks) and matches stable system-prompt markers.
+The hook runs before combo resolution, so it derives unknown sentinels from the
+validated routing model rather than `context.combo`.
 
 | Request | Destination |
 | --- | --- |
@@ -52,6 +55,7 @@ Sentinel combos point back to the original combo, so behavior and cost stay the 
 
 ```text
 hooks/cc-background-to-luna.js  Runtime redirect hook
+test/test-hook.js               Zero-dependency routing regression tests
 classify.py                     Live call-log watcher
 ```
 
