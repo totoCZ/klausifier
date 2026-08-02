@@ -12,6 +12,7 @@ vm.createContext(sandbox);
 const hook = vm.runInContext("(function (context) {\n" + source + "\n})", sandbox);
 
 const MAIN = "You are Claude Code, Anthropic's official CLI";
+const CODEX = "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.";
 const SDK = "You are a Claude Agent, built on Anthropic's Claude Agent SDK";
 const SECURITY = "You are a security monitor for autonomous AI coding agents";
 const TITLE = "Generate a concise, sentence-case title";
@@ -19,6 +20,10 @@ const KEBAB = "Generate a short kebab-case name";
 
 function context(model, bodyModel, system) {
   return { model: model, body: { model: bodyModel, system: system } };
+}
+
+function codexContext(model, bodyModel, instructions) {
+  return { model: model, body: { model: bodyModel, instructions: instructions } };
 }
 
 function expect(name, input, expected) {
@@ -72,6 +77,16 @@ expect(
 expect(
   "main Claude Code turn remains untouched",
   context("terra", "provider/model", MAIN),
+  {}
+);
+expect(
+  "main Codex turn remains untouched",
+  codexContext("terra", "provider/model", CODEX),
+  {}
+);
+expect(
+  "Codex instructions do not fall through to the unknown sentinel",
+  codexContext("sol", "provider/model", "Before the coding instructions, include setup details.\n" + CODEX),
   {}
 );
 expect(

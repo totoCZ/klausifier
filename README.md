@@ -4,7 +4,7 @@
 
 Route AI coding agents' background requests to cheaper models without logging traffic or rebuilding the gateway.
 
-Built for [OmniRoute](https://github.com/diegosouzapw/OmniRoute) and Claude Code, using a runtime pre-request hook. The same pattern works with any gateway that can inspect and rewrite requests before model selection.
+Built for [OmniRoute](https://github.com/diegosouzapw/OmniRoute), Claude Code, and Codex CLI, using a runtime pre-request hook. The same pattern works with any gateway that can inspect and rewrite requests before model selection.
 
 > **事半功倍** — *shì bàn gōng bèi* — "Half the effort, twice the result."
 >
@@ -32,7 +32,8 @@ request → hook → model/combo selection → backend
 ## How it works
 
 The hook gates on OmniRoute's `context.model` routing model, then normalizes
-`context.body.system` (string or text blocks) and matches stable system-prompt markers.
+Claude Code's `context.body.system` (string or text blocks) and Codex CLI's
+`context.body.instructions`, and matches stable prompt markers.
 The hook runs before combo resolution, so it derives unknown sentinels from the
 validated routing model rather than `context.combo`.
 
@@ -40,7 +41,7 @@ validated routing model rather than `context.combo`.
 | --- | --- |
 | Security classifier | `security` |
 | Title or branch generation | `cheap` |
-| Main Claude Code turn | unchanged |
+| Main Claude Code or Codex CLI turn | unchanged |
 | Unrecognized request | `unknown-<origin>` sentinel |
 
 Sentinel combos point back to the original combo, so behavior and cost stay the same while `summary.comboName` records that the request was unmatched. This makes discovery possible without adding logging.
@@ -103,7 +104,7 @@ Verify with `GET /api/middleware/hooks`. Update with `PUT …/hooks/cc-backgroun
 
 ### 3. Watch and refine
 
-Run `classify.py` while using Claude Code. When a recurring request appears under `unknown-*`, add its system-prompt marker to `CHEAP_MARKERS` or `SECURITY_MARKERS`, then update the hook.
+Run `classify.py` while using Claude Code or Codex CLI. When a recurring request appears under `unknown-*`, add its prompt marker to `CHEAP_MARKERS` or `SECURITY_MARKERS`, then update the hook.
 
 ## Adapting the pattern
 
@@ -122,6 +123,10 @@ Claude Code markers used here:
 - Title: `Generate a concise, sentence-case title`
 - Branch: `Generate a short kebab-case name`
 - Main turn: `You are Claude Code, Anthropic's official CLI` (never redirect)
+
+Codex CLI marker used here:
+
+- Main turn: `You are a coding agent running in the Codex CLI` (never redirect)
 
 ## Notes
 

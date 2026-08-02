@@ -1,6 +1,6 @@
-// Claude Code traffic router.
+// Coding-agent traffic router.
 //   known background (security/title/branch) → security / cheap combos
-//   known main turn (Claude Code prefix)      → untouched, stays on its combo
+//   known main turn (Claude Code or Codex prefix) → untouched, stays on its combo
 //   everything else (unknown)                 → unknown-<origin> sentinel combo
 //                                                (a combo-ref back to the origin:
 //                                                 same backends/load balancer, but
@@ -22,17 +22,20 @@ if (TIER_MODELS.indexOf(requestedModel) === -1) {
   return {};
 }
 
-var raw = b.system;
-var sys = "";
-if (typeof raw === "string") {
-  sys = raw.toLowerCase();
-} else if (Array.isArray(raw)) {
-  for (var i = 0; i < raw.length; i++) {
-    var blk = raw[i];
-    if (blk && typeof blk.text === "string") sys += "\n" + blk.text;
+var rawSystem = b.system;
+var prompt = "";
+if (typeof rawSystem === "string") {
+  prompt = rawSystem;
+} else if (Array.isArray(rawSystem)) {
+  for (var i = 0; i < rawSystem.length; i++) {
+    var blk = rawSystem[i];
+    if (blk && typeof blk.text === "string") prompt += "\n" + blk.text;
   }
-  sys = sys.toLowerCase();
 }
+if (typeof b.instructions === "string") {
+  prompt += "\n" + b.instructions;
+}
+var sys = prompt.toLowerCase();
 
 // Background-task markers are checked BEFORE the no-op shields below. The
 // security monitor is itself a Claude Agent SDK subagent, so its full system
@@ -60,6 +63,9 @@ for (var i = 0; i < CHEAP_MARKERS.length; i++) {
 // Known main coding turn — must be checked before the unknown bucket so it never
 // gets rerouted. Return {} = no-op, stays on its original combo.
 if (sys.indexOf("you are claude code, anthropic's official cli") !== -1) {
+  return {};
+}
+if (sys.indexOf("you are a coding agent running in the codex cli") !== -1) {
   return {};
 }
 // Working subagents do real work — deliberately left untouched. (Background
