@@ -26,6 +26,12 @@ if (typeof b === "string") {
 // client requested; body.model may already contain the selected provider model.
 var requestedModel = context.model || b.model || "";
 
+// Codex auto-review is a Guardian review subagent — route to security like the
+// other Guardian paths (header and prompt marker).
+if (requestedModel === "codex-auto-review") {
+  return { model: "security" };
+}
+
 // Only intercept if the requested routing model is one of the three tiers.
 var TIER_MODELS = ["luna", "terra", "sol"];
 if (TIER_MODELS.indexOf(requestedModel) === -1) {

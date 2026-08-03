@@ -111,9 +111,9 @@ expect(
   {}
 );
 expect(
-  "Codex auto-review combo remains independent of the tier hook",
+  "Codex auto-review routes to security",
   codexContext("codex-auto-review", "provider/model", "You are judging one planned coding-agent action."),
-  {}
+  { model: "security" }
 );
 expect(
   "body model remains a compatibility fallback",
