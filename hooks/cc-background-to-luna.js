@@ -33,6 +33,16 @@ if (TIER_MODELS.indexOf(requestedModel) === -1) {
   return {};
 }
 
+// Codex Guardian identifies its review requests at the transport layer. The
+// request handler exposes incoming headers to hooks as lower-case keys, so use
+// this precise metadata signal before inspecting prompt content. The marker
+// below remains a compatibility fallback for clients/proxies that drop it.
+var subagent = context.headers && context.headers["x-openai-subagent"];
+if (Array.isArray(subagent)) subagent = subagent[0];
+if (typeof subagent === "string" && subagent.toLowerCase() === "guardian") {
+  return { model: "security" };
+}
+
 var rawSystem = b.system;
 var prompt = "";
 if (typeof rawSystem === "string") {
@@ -66,13 +76,14 @@ if (Array.isArray(b.input)) {
 }
 var sys = prompt.toLowerCase();
 
-// Background-task markers are checked BEFORE the no-op shields below. The
-// security monitor is itself a Claude Agent SDK subagent, so its full system
-// prompt carries the SDK identity line — if the SDK no-op ran first it would
-// shield the security monitor and leave it on a premium combo. These markers
-// are unambiguous (never in a real main turn), so they must win.
+// Background-task markers are checked before the no-op shields below. The
+// Claude security monitor is itself an SDK subagent, so its marker must win
+// over the SDK identity. Guardian normally matches the header above; its
+// prompt marker is only a compatibility fallback.
 var SECURITY_MARKERS = [
-  "you are a security monitor for autonomous ai coding agents"
+  "you are a security monitor for autonomous ai coding agents",
+  // Guardian fallback when its x-openai-subagent header is unavailable.
+  "you are judging one planned coding-agent action"
 ];
 var CHEAP_MARKERS = [
   "generate a concise, sentence-case title",

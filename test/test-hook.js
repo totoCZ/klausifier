@@ -15,6 +15,7 @@ const MAIN = "You are Claude Code, Anthropic's official CLI";
 const CODEX = "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.";
 const SDK = "You are a Claude Agent, built on Anthropic's Claude Agent SDK";
 const SECURITY = "You are a security monitor for autonomous AI coding agents";
+const GUARDIAN = "You are judging one planned coding-agent action.";
 const TITLE = "Generate a concise, sentence-case title";
 const KEBAB = "Generate a short kebab-case name";
 
@@ -75,6 +76,29 @@ expect(
   "security marker wins over SDK identity",
   context("luna", "provider/model", SDK + "\n" + SECURITY),
   { model: "security" }
+);
+expect(
+  "Guardian prompt marker remains a fallback",
+  currentCodexContext("terra", "provider/model", GUARDIAN),
+  { model: "security" }
+);
+expect(
+  "Guardian header routes security monitor without prompt marker",
+  {
+    model: "terra",
+    headers: { "x-openai-subagent": "guardian" },
+    body: { model: "provider/model", input: [] }
+  },
+  { model: "security" }
+);
+expect(
+  "Guardian header cannot redirect a direct provider request",
+  {
+    model: "provider/model",
+    headers: { "x-openai-subagent": "guardian" },
+    body: { model: "provider/model", input: [] }
+  },
+  {}
 );
 expect(
   "direct provider request with marker remains untouched",
