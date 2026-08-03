@@ -11,6 +11,17 @@
 // OmniRoute exposes the incoming request body on context.body. Do not use an
 // ambient `b` binding here: it is not the request body in every hook runtime.
 var b = context.body || {};
+// Depending on the ingress path, OmniRoute can expose the body either as an
+// already-parsed object or as its raw JSON string. Normalize both forms before
+// reading `system`; otherwise a valid security-monitor request silently falls
+// through because `b.system` is undefined on a string.
+if (typeof b === "string") {
+  try {
+    b = JSON.parse(b);
+  } catch (e) {
+    b = {};
+  }
+}
 // The hook runs before combo resolution. context.model is the routing model the
 // client requested; body.model may already contain the selected provider model.
 var requestedModel = context.model || b.model || "";

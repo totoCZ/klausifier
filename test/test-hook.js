@@ -55,6 +55,13 @@ expect(
   { model: "security" }
 );
 expect(
+  "JSON-encoded body routes security monitor",
+  { model: "luna", body: JSON.stringify({ model: "provider/model", system: [
+    { type: "text", text: SECURITY }
+  ] }) },
+  { model: "security" }
+);
+expect(
   "security marker wins over SDK identity",
   context("luna", "provider/model", SDK + "\n" + SECURITY),
   { model: "security" }
