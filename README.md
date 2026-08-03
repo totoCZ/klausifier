@@ -24,7 +24,7 @@ other combo names remain untouched.
 | Client | Request prompt field | Recognized traffic | Routing behavior |
 | --- | --- | --- | --- |
 | Claude Code | `body.system` | Security monitor, title generation, branch naming | Routes known background work to `security` or `cheap`; main turns and working SDK subagents stay on their selected tier. |
-| Codex CLI | `body.instructions` | Normal coding-agent instruction prefix | Normal coding turns stay on their selected tier; unmatched tier traffic is visible through `unknown-<tier>`. |
+| Codex CLI | `body.instructions` or developer `body.input[].content[].text` | Normal coding-agent instruction prefix | Normal coding turns stay on their selected tier; unmatched tier traffic is visible through `unknown-<tier>`. |
 | Codex auto review | Review request selected as `codex-auto-review` | Security-policy action review | Configure `codex-auto-review` as its own combo; it is not rewritten by this hook. |
 
 Codex auto review is distinct from Claude Code's `security` classifier. The
@@ -35,8 +35,9 @@ observable as `codex-auto-review` in OmniRoute call logs.
 
 Claude Code uses the Anthropic request format, with its system prompt in
 top-level `body.system` instead of a `messages[]` system entry. Codex CLI uses
-the Responses API-style `body.instructions` field. The hook normalizes both
-fields before matching markers:
+the Responses API-style `body.instructions` field in older requests and
+developer messages in `body.input` in current requests. The hook normalizes
+both forms before matching markers:
 
 ```text
 request → hook → model/combo selection → backend

@@ -46,6 +46,24 @@ if (typeof rawSystem === "string") {
 if (typeof b.instructions === "string") {
   prompt += "\n" + b.instructions;
 }
+// Current Codex CLI Responses API requests put their persistent instructions in
+// developer messages under `input`, rather than the former top-level
+// `instructions` field. Read only developer content so user text cannot opt a
+// request out of unknown-request discovery by imitating the identity marker.
+if (Array.isArray(b.input)) {
+  for (var j = 0; j < b.input.length; j++) {
+    var item = b.input[j];
+    if (!item || item.role !== "developer") continue;
+    if (typeof item.content === "string") {
+      prompt += "\n" + item.content;
+    } else if (Array.isArray(item.content)) {
+      for (var k = 0; k < item.content.length; k++) {
+        var content = item.content[k];
+        if (content && typeof content.text === "string") prompt += "\n" + content.text;
+      }
+    }
+  }
+}
 var sys = prompt.toLowerCase();
 
 // Background-task markers are checked BEFORE the no-op shields below. The
@@ -77,6 +95,9 @@ if (sys.indexOf("you are claude code, anthropic's official cli") !== -1) {
   return {};
 }
 if (sys.indexOf("you are a coding agent running in the codex cli") !== -1) {
+  return {};
+}
+if (sys.indexOf("you are codex, an agent based on gpt-5") !== -1) {
   return {};
 }
 // Working subagents do real work — deliberately left untouched. (Background

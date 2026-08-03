@@ -26,6 +26,16 @@ function codexContext(model, bodyModel, instructions) {
   return { model: model, body: { model: bodyModel, instructions: instructions } };
 }
 
+function currentCodexContext(model, bodyModel, content) {
+  return {
+    model: model,
+    body: {
+      model: bodyModel,
+      input: [{ role: "developer", content: [{ type: "input_text", text: content }] }]
+    }
+  };
+}
+
 function expect(name, input, expected) {
   const actual = hook(input);
   assert.deepStrictEqual(
@@ -100,6 +110,22 @@ expect(
   "Codex instructions do not fall through to the unknown sentinel",
   codexContext("sol", "provider/model", "Before the coding instructions, include setup details.\n" + CODEX),
   {}
+);
+expect(
+  "current Codex Responses API developer identity remains untouched",
+  currentCodexContext("terra", "provider/model", "You are Codex, an agent based on GPT-5. You and the user share one workspace."),
+  {}
+);
+expect(
+  "Codex identity in user input does not bypass unknown discovery",
+  {
+    model: "terra",
+    body: {
+      model: "provider/model",
+      input: [{ role: "user", content: [{ type: "input_text", text: "You are Codex, an agent based on GPT-5." }] }]
+    }
+  },
+  { model: "unknown-terra" }
 );
 expect(
   "working SDK subagent remains untouched",
