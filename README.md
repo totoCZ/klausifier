@@ -18,18 +18,17 @@ The hook runs before combo resolution. It uses `context.model` as the requested 
 | Claude title or branch task | `body.system` marker | `cheap` |
 | Claude main turn or working SDK subagent | Identity marker | unchanged |
 | Codex main turn | Developer instruction identity marker | unchanged |
-| Codex auto review | Client-selected `codex-auto-review` model | unchanged |
+| Codex auto review | Client-selected `codex-auto-review` model | `security` |
 | Other tier request | No recognized signal | `unknown-<origin>` |
 
-Guardian and Codex auto review are separate: Guardian is a background reviewer that the hook routes to `security`; auto review already selects `codex-auto-review` and the hook leaves it alone. Keep those combos separate so each workload is observable and can use an appropriate model.
+All Guardian review paths (header, prompt marker, and `codex-auto-review` model) route to the `security` combo. This makes Guardian and Codex auto review observable under a single workload.
 
 `unknown-luna`, `unknown-terra`, and `unknown-sol` should be combo references to their respective origin combos. They preserve backend behavior while making unmatched traffic visible through `summary.comboName`, without logging prompt contents.
 
 | `comboName` | Meaning |
 | --- | --- |
-| `security` | Claude security monitor or Codex Guardian review |
+| `security` | Claude security monitor, Codex Guardian review, or Codex auto review |
 | `cheap` | Claude title or branch request |
-| `codex-auto-review` | Client-selected Codex auto-review request |
 | `unknown-luna` / `unknown-terra` / `unknown-sol` | Unmatched tier request to inspect |
 | `luna` / `terra` / `sol` | Recognized main coding request |
 
@@ -64,7 +63,6 @@ Create these once through the OmniRoute UI or API. The reference target is an ex
 | `unknown-luna` | `luna` | Unmatched `luna` sentinel |
 | `unknown-terra` | `terra` | Unmatched `terra` sentinel |
 | `unknown-sol` | `sol` | Unmatched `sol` sentinel |
-| `codex-auto-review` | chosen review model/combo | Codex auto-review target |
 
 ## Install or update the live hook
 
