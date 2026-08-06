@@ -38,6 +38,21 @@ All Guardian review paths (header, prompt marker, and `codex-auto-review` model)
 | `unknown-luna` / `unknown-terra` / `unknown-sol` | Unmatched tier request to inspect |
 | `luna` / `terra` / `sol` | Recognized main coding request |
 
+### Guardian tool-protocol downgrade
+
+Current Codex sends tool definitions as an `additional_tools` input item and tool exchanges as `custom_tool_call` / `custom_tool_call_output` items, plus `reasoning` items. These newer Responses-API types are only accepted by real OpenAI; older Responses backends reject the entire request — Meta responds `input[0] did not match any supported type` (the offending item is the `additional_tools` entry at index 0).
+
+On any Guardian path the hook downgrades to the classic Responses tool protocol before OmniRoute forwards the request:
+
+| New type (OpenAI-only) | Downgraded to |
+| --- | --- |
+| `additional_tools` (input item) | top-level `tools[]` (each def normalized to `type: function`) |
+| `custom_tool_call` | `function_call` (`input` stringified into `arguments`) |
+| `custom_tool_call_output` | `function_call_output` (output content blocks joined into a string) |
+| `reasoning` | dropped |
+
+Structured output is **not** touched: the Guardian's `text.format` (`json_schema`) is left intact because both `security` backends support it natively — Meta via `text.format` on `/v1/responses`, OpenRouter via `response_format` on `/v1/chat/completions` after OmniRoute's responses→completions translation. This is a no-op for Claude/Anthropic-format security requests, which carry no `input`.
+
 ## Signals
 
 Structured transport metadata is preferred over prompt matching. OmniRoute provides inbound headers to hooks in `context.headers` using lower-case names, so Guardian routing uses:

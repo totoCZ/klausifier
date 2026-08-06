@@ -177,4 +177,81 @@ expect(
   {}
 );
 
+// --- Guardian tool-protocol downgrade -------------------------------------
+// Current Codex sends additional_tools / custom_tool_call / custom_tool_call_output /
+// reasoning input items. Only real OpenAI accepts these; older Responses backends
+// (Meta) reject them. The hook must downgrade to the classic protocol while
+// leaving structured output (text.format) intact — both security backends
+// support json_schema natively.
+(function () {
+  var ctx = {
+    model: "terra",
+    headers: { "x-openai-subagent": "guardian" },
+    body: {
+      model: "provider/model",
+      text: { format: { type: "json_schema", schema: { type: "object" } } },
+      input: [
+        { type: "additional_tools", role: "developer",
+          tools: [
+            { type: "custom", name: "exec", description: "run js", parameters: { type: "object" } },
+            { type: "function", name: "wait", strict: true }
+          ] },
+        { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "low risk" }] },
+        { type: "custom_tool_call", call_id: "call_1", name: "exec",
+          input: { cmd: "ls" }, status: "completed" },
+        { type: "custom_tool_call_output", call_id: "call_1",
+          output: [{ type: "input_text", text: "result line 1" }, { type: "input_text", text: " x" }] }
+      ]
+    }
+  };
+  var result = hook(ctx);
+  assert.strictEqual(result.model, "security", "new-protocol guardian routes to security");
+
+  // text.format preserved (both backends support json_schema natively)
+  assert.ok(ctx.body.text && ctx.body.text.format, "text.format structured output preserved");
+
+  // additional_tools hoisted to top-level tools[], all downgraded to type:function
+  assert.ok(Array.isArray(ctx.body.tools), "top-level tools[] created");
+  assert.strictEqual(ctx.body.tools.length, 2, "both tool defs hoisted");
+  ctx.body.tools.forEach(function (t) {
+    assert.strictEqual(t.type, "function", "tool def is classic function type");
+  });
+  assert.strictEqual(ctx.body.tools[0].name, "exec", "exec tool preserved");
+  assert.strictEqual(ctx.body.tools[1].strict, true, "strict flag preserved");
+
+  var remaining = ctx.body.input.map(function (it) { return it && it.type; });
+  assert.strictEqual(remaining.indexOf("additional_tools"), -1, "additional_tools item removed");
+  assert.strictEqual(remaining.indexOf("custom_tool_call"), -1, "custom_tool_call downgraded");
+  assert.strictEqual(remaining.indexOf("custom_tool_call_output"), -1, "custom_tool_call_output downgraded");
+  assert.strictEqual(remaining.indexOf("reasoning"), -1, "reasoning item dropped");
+
+  var fc = ctx.body.input.find(function (it) { return it && it.type === "function_call"; });
+  assert.ok(fc, "function_call present");
+  assert.strictEqual(fc.call_id, "call_1", "function_call call_id preserved");
+  assert.strictEqual(fc.name, "exec", "function_call name preserved");
+  assert.strictEqual(fc.arguments, '{"cmd":"ls"}', "function_call input stringified");
+
+  var fco = ctx.body.input.find(function (it) { return it && it.type === "function_call_output"; });
+  assert.ok(fco, "function_call_output present");
+  assert.strictEqual(fco.call_id, "call_1", "function_call_output call_id preserved");
+  assert.strictEqual(fco.output, "result line 1 x", "output blocks joined to string");
+
+  console.log("ok - guardian new-protocol tools downgraded, structured output preserved");
+})();
+
+// A guardian request with only classic types is a pure routing no-op on the body.
+(function () {
+  var ctx = {
+    model: "terra",
+    headers: { "x-openai-subagent": "guardian" },
+    body: { model: "provider/model", input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }
+    ] }
+  };
+  var result = hook(ctx);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), { model: "security" });
+  assert.strictEqual(ctx.body.input.length, 1, "no items added or removed");
+  console.log("ok - guardian with classic types left structurally unchanged");
+})();
+
 console.log("all hook routing tests passed");
