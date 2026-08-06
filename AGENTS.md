@@ -77,3 +77,60 @@ classification. Combo resolution happens after this hook, so `context.combo` is
 not a reliable origin here. Direct provider model IDs such as
 `antigravity/gemini-3.1-flash-lite` must return `{}` and remain untouched. The API
 update is live immediately; a container restart is not required.
+
+### Automatic hook registration after container restart
+
+OmniRoute stores hooks in SQLite (persistent) but does not populate the
+in-memory runtime registry (`globalThis.__omniroutePreRequestRegistry`) from
+the database on startup. After every restart, `registryCount` drops to 0 while
+`dbCount` stays > 0 — hooks appear `enabled: true` in the API but silently stop
+executing.
+
+This is fixed via an entrypoint wrapper on the persistent data volume:
+
+1. Place `hook-sync.js` and `entrypoint-wrapper.sh` in `/app/data/` (the
+   persistent volume). Sources are in `/root/patch/omniroute/`.
+
+2. The wrapper launches `hook-sync.js` in the background, then execs the
+   original entrypoint (`/tmp/check-permissions.sh`) unchanged.
+
+3. `hook-sync.js` polls localhost until HTTP responds, checks `registryStats`,
+   and if `registryCount=0` with `dbCount>0`, re-registers each hook via PUT.
+
+4. Set the container entrypoint to the wrapper:
+
+   ```sh
+   incus config set omniroute \
+     oci.entrypoint='/app/data/entrypoint-wrapper.sh node dev/run-standalone.mjs'
+   ```
+
+Both files survive container rebuilds because they live on the data volume.
+The `oci.entrypoint` config persists in Incus's database.
+
+### Verify hook registration after a container restart
+
+OmniRoute may fail to load hooks from the database into the runtime registry on
+restart. The hook will appear `enabled: true` in the API but will silently stop
+executing. Check the registry stats:
+
+```sh
+incus exec omniroute -- node -e "
+  const http=require('http');
+  http.get('http://localhost/api/middleware/hooks', r=>{
+    let d='';
+    r.on('data',c=>d+=c);
+    r.on('end',()=>{
+      const s=JSON.parse(d).registryStats;
+      console.log(s);
+      if(s.registryCount===0 && s.dbCount>0) {
+        console.error('HOOK NOT LOADED — re-register via step 3 above');
+        process.exitCode=1;
+      }
+    });
+  });
+"
+```
+
+If `registryCount` is 0 while `dbCount` is > 0, re-push and re-PUT the hook
+(step 1 and step 3 above). A simple `PUT` with the same code forces OmniRoute
+to reload the hook into the runtime registry. Confirm `registryCount` becomes 1.
