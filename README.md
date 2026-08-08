@@ -104,5 +104,7 @@ translation). The historic `unknown-<origin>` sentinel — which rerouted
 unmatched tier requests to a phantom combo purely so OmniRoute's comboName
 would record them as unknown — is replaced by a lighter LiteLLM equivalent:
 unmatched requests stay on their original combo but get a
-`metadata["traffic_router"] = "unknown"` tag that LiteLLM logs into the spend
-row, so they're attributable as unknown without defining extra model groups.
+`metadata["spend_logs_metadata"]["traffic_router"] = "unknown"` tag that
+LiteLLM persists into the spend row (LiteLLM drops arbitrary top-level
+metadata keys; only the nested `spend_logs_metadata` dict survives), so they
+are attributable as unknown without defining extra model groups.

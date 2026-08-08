@@ -187,11 +187,15 @@ class TrafficRouter(CustomLogger):
         # Unmatched tier request — keep it on its original combo but tag it
         # unknown for spend attribution. This mirrors the historic hook's
         # unknown-<origin> sentinel combo (same backends, but recorded as
-        # unknown) without needing a separate model group per tier: LiteLLM
-        # logs data["metadata"] into the spend row, so the model_group still
-        # names the origin (luna/terra/sol) while this tag flags it unmatched.
+        # unknown) without needing a separate model group per tier. LiteLLM
+        # drops arbitrary top-level metadata keys when building the spend row;
+        # only the nested `spend_logs_metadata` dict is persisted, so the tag
+        # must go there. The model_group still names the origin (luna/terra/
+        # sol) while this flags it unmatched.
         metadata = data.get("metadata") or {}
-        metadata["traffic_router"] = "unknown"
+        spend_meta = metadata.get("spend_logs_metadata") or {}
+        spend_meta["traffic_router"] = "unknown"
+        metadata["spend_logs_metadata"] = spend_meta
         data["metadata"] = metadata
         return data
 
