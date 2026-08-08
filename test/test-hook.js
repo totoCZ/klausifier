@@ -254,4 +254,82 @@ expect(
   console.log("ok - guardian with classic types left structurally unchanged");
 })();
 
+// --- downgrade applies on EVERY tier-routed path, not only security ---------
+// A Codex main turn carries the same new-protocol items as a Guardian request.
+// It must route {} (main turn untouched) yet still have its body downgraded so
+// the luna/terra/sol balancer can land it on a Meta-class Responses backend.
+(function () {
+  var ctx = {
+    model: "terra",
+    body: {
+      model: "provider/model",
+      input: [
+        { type: "additional_tools", role: "developer",
+          tools: [{ type: "custom", name: "exec", description: "run js", parameters: { type: "object" } }] },
+        { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "thinking" }] },
+        { type: "custom_tool_call", call_id: "call_1", name: "exec",
+          input: { cmd: "ls" }, status: "completed" },
+        { type: "custom_tool_call_output", call_id: "call_1",
+          output: [{ type: "input_text", text: "result" }] },
+        { type: "message", role: "developer",
+          content: [{ type: "input_text", text: CODEX }] },
+        { type: "message", role: "user",
+          content: [{ type: "input_text", text: "list files" }] }
+      ]
+    }
+  };
+  var result = hook(ctx);
+  // routing decision unchanged — still a main turn
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {}, "main codex turn routing untouched");
+
+  // but the body was downgraded in place
+  assert.ok(Array.isArray(ctx.body.tools) && ctx.body.tools.length === 1, "tools hoisted");
+  assert.strictEqual(ctx.body.tools[0].type, "function", "tool def is classic function");
+  assert.strictEqual(ctx.body.tools[0].name, "exec", "exec tool preserved");
+
+  var types = ctx.body.input.map(function (it) { return it && it.type; });
+  assert.strictEqual(types.indexOf("additional_tools"), -1, "additional_tools removed on main turn");
+  assert.strictEqual(types.indexOf("custom_tool_call"), -1, "custom_tool_call downgraded on main turn");
+  assert.strictEqual(types.indexOf("custom_tool_call_output"), -1, "custom_tool_call_output downgraded on main turn");
+  assert.strictEqual(types.indexOf("reasoning"), -1, "reasoning dropped on main turn");
+
+  var fc = ctx.body.input.find(function (it) { return it && it.type === "function_call"; });
+  assert.ok(fc && fc.arguments === '{"cmd":"ls"}', "function_call present with stringified args");
+  console.log("ok - main codex turn routing untouched but body downgraded for meta");
+})();
+
+// The unknown sentinel also forwards the Responses body to the origin combo, so
+// it must be downgraded too.
+(function () {
+  var ctx = {
+    model: "terra",
+    body: {
+      model: "provider/model",
+      input: [
+        { type: "additional_tools", role: "developer",
+          tools: [{ type: "custom", name: "exec", parameters: { type: "object" } }] },
+        { type: "message", role: "developer",
+          content: [{ type: "input_text", text: "unrecognized instructions" }] }
+      ]
+    }
+  };
+  var result = hook(ctx);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), { model: "unknown-terra" }, "unmatched routes to sentinel");
+  assert.strictEqual(ctx.body.input.map(function (it) { return it && it.type; }).indexOf("additional_tools"), -1,
+    "additional_tools removed on unknown path");
+  assert.ok(Array.isArray(ctx.body.tools) && ctx.body.tools.length === 1, "unknown path tools hoisted");
+  console.log("ok - unknown sentinel body downgraded for meta");
+})();
+
+// A Claude/Anthropic-format request (system, no `input`) is a true no-op: the
+// downgrade must not synthesize or alter the body.
+(function () {
+  var ctx = { model: "luna", body: { model: "provider/model", system: [{ type: "text", text: MAIN }] } };
+  var before = JSON.parse(JSON.stringify(ctx.body));
+  var result = hook(ctx);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(result)), {}, "claude main turn routing untouched");
+  assert.deepStrictEqual(ctx.body, before, "claude body not mutated (no input array)");
+  console.log("ok - claude/anthropic body left structurally unchanged");
+})();
+
 console.log("all hook routing tests passed");

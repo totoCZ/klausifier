@@ -38,11 +38,13 @@ All Guardian review paths (header, prompt marker, and `codex-auto-review` model)
 | `unknown-luna` / `unknown-terra` / `unknown-sol` | Unmatched tier request to inspect |
 | `luna` / `terra` / `sol` | Recognized main coding request |
 
-### Guardian tool-protocol downgrade
+### Responses tool-protocol downgrade
 
 Current Codex sends tool definitions as an `additional_tools` input item and tool exchanges as `custom_tool_call` / `custom_tool_call_output` items, plus `reasoning` items. These newer Responses-API types are only accepted by real OpenAI; older Responses backends reject the entire request — Meta responds `input[0] did not match any supported type` (the offending item is the `additional_tools` entry at index 0).
 
-On any Guardian path the hook downgrades to the classic Responses tool protocol before OmniRoute forwards the request:
+The same Codex payload that breaks a Guardian review breaks any tier-routed main turn: the `luna`/`terra`/`sol` combos load-balance across OpenAI, OpenRouter, and Meta, so the balancer can land a recognized main turn on a Meta-class backend and hit the same rejection. The hook therefore downgrades the body on **every tier-routed path** (security, cheap, main turn, and `unknown-<tier>`), not only Guardian. Direct provider model IDs are excluded and remain untouched.
+
+Before OmniRoute forwards the request, the hook downgrades to the classic Responses tool protocol:
 
 | New type (OpenAI-only) | Downgraded to |
 | --- | --- |
@@ -51,7 +53,9 @@ On any Guardian path the hook downgrades to the classic Responses tool protocol 
 | `custom_tool_call_output` | `function_call_output` (output content blocks joined into a string) |
 | `reasoning` | dropped |
 
-Structured output is **not** touched: the Guardian's `text.format` (`json_schema`) is left intact because both `security` backends support it natively — Meta via `text.format` on `/v1/responses`, OpenRouter via `response_format` on `/v1/chat/completions` after OmniRoute's responses→completions translation. This is a no-op for Claude/Anthropic-format security requests, which carry no `input`.
+`reasoning` is dropped unconditionally: Meta reasoning replay is [encrypted-only](https://dev.meta.ai/docs/protocols/responses) and the blob is backend-specific, so across the heterogeneous balancer the `encrypted_content` is undecryptable — and real Codex payloads carry none. Codex regenerates chain-of-thought each turn, so dropping it is lossless for correctness.
+
+Structured output is **not** touched: `text.format` (`json_schema`) is left intact because every backend supports it natively — Meta via `text.format` on `/v1/responses`, OpenRouter via `response_format` on `/v1/chat/completions` after OmniRoute's responses→completions translation. The downgrade is a no-op when the body has no `input` array, i.e. all Claude/Anthropic-format requests.
 
 ## Signals
 

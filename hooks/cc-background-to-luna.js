@@ -22,28 +22,35 @@ if (typeof b === "string") {
     b = {};
   }
 }
-// Security-route helper: route to the security combo AND downgrade the Codex
-// tool protocol so non-OpenAI Responses backends accept the Guardian (Codex
-// auto-review) request.
-//
-// Current Codex sends tool definitions as an `additional_tools` input item and
-// tool exchanges as `custom_tool_call` / `custom_tool_call_output` items, plus
-// `reasoning` items. Only real OpenAI accepts these newer Responses-API types;
-// older Responses backends (Meta) reject the whole request with
-// "input[0] did not match any supported type". We downgrade to the classic
-// types they accept:
+// Responses tool-protocol downgrade. Current Codex sends tool definitions as
+// an `additional_tools` input item and tool exchanges as `custom_tool_call` /
+// `custom_tool_call_output` items, plus `reasoning` items. Only real OpenAI
+// accepts these newer Responses-API types; older Responses backends (Meta)
+// reject the whole request with "input[0] did not match any supported type".
+// We downgrade to the classic types they accept:
 //   additional_tools        -> top-level `tools[]` (defs become type:function)
 //   custom_tool_call        -> function_call        (input stringified)
 //   custom_tool_call_output -> function_call_output (output blocks -> string)
-//   reasoning               -> dropped              (unsupported)
+//   reasoning               -> dropped              (encrypted-only on Meta)
 //
 // Structured output (text.format json_schema) is left intact: both security
 // backends support it natively (Meta via text.format on /responses, OpenRouter
 // via response_format on /chat/completions after OmniRoute's translation). See
 // Meta's structured-output docs. This runs before combo resolution, so it
-// covers every backend the security combo can land on. No-op for
-// Claude/Anthropic-format security requests (no `input`).
-function routeSecurity() {
+// covers every backend the combo can land on. No-op for Claude/Anthropic-format
+// requests (no `input`).
+//
+// This rewrite is NOT security-specific. The same Codex Responses payload that
+// breaks Guardian breaks any tier-routed main turn that the load balancer lands
+// on a Meta-class backend — Meta rejects `additional_tools` with
+// "input[0] did not match any supported type". So downgradeResponsesTools() is
+// called once on every tier-routed path, not only from routeSecurity().
+//
+// `reasoning` is dropped unconditionally: Meta replay is encrypted-only and the
+// blob is backend-specific, so across the heterogeneous (OpenAI/OpenRouter/Meta)
+// balancer the encrypted_content is undecryptable — and real Codex payloads
+// carry none anyway. Codex regenerates chain-of-thought each turn.
+function downgradeResponsesTools() {
   if (Array.isArray(b.input)) {
     var next = [];
     for (var i = 0; i < b.input.length; i++) {
@@ -94,14 +101,18 @@ function routeSecurity() {
       }
 
       if (item.type === "reasoning") {
-        continue; // unsupported by older Responses backends
+        continue; // encrypted-only on Meta; undecryptable across the balancer
       }
 
       next.push(item);
     }
     b.input = next;
   }
+}
 
+// Security route = downgrade the body, then route to the security combo.
+function routeSecurity() {
+  downgradeResponsesTools();
   return { model: "security" };
 }
 
@@ -121,6 +132,13 @@ if (TIER_MODELS.indexOf(requestedModel) === -1) {
   // A direct provider model ID must remain untouched.
   return {};
 }
+
+// Every tier-routed request forwards to the origin combo, whose balancer may
+// land on a Meta-class Responses backend. Downgrade new Codex Responses item
+// types to the classic ones those backends accept. No-op without `b.input`
+// (Claude/Anthropic format). Idempotent, so the security paths' own call inside
+// routeSecurity() is harmless. Direct provider IDs (returned above) are excluded.
+downgradeResponsesTools();
 
 // Codex Guardian identifies its review requests at the transport layer. The
 // request handler exposes incoming headers to hooks as lower-case keys, so use
