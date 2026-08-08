@@ -1,5 +1,7 @@
 # LLM Traffic Router
 
+![logo](contrib/logo.jpg)
+
 Routes coding-agent traffic (Claude Code, Codex CLI) through a [LiteLLM](https://github.com/BerriAI/litellm)
 proxy by rewriting which model/combo each request targets — before LiteLLM
 resolves it and load-balances upstream.
