@@ -34,7 +34,7 @@ prompt text from the request body.
 | Claude title or branch task | `system` marker | `cheap` |
 | Claude main turn or working SDK subagent | Identity marker | unchanged |
 | Codex main turn | Developer instruction identity marker | unchanged |
-| Other tier request | No recognized signal | unchanged (stays on its combo) |
+| Other tier request | No recognized signal | unchanged, tagged `unknown` (metadata) |
 
 `security` and `cheap` are virtual names that resolve via the
 `model_group_alias` in LiteLLM's `router_settings` (e.g. `security -> luna`).
@@ -100,5 +100,9 @@ This is a port of an earlier OmniRoute middleware hook.
 preserved verbatim for reference; `historic/test-hook.js` is its regression test.
 The port carries over the routing decisions but drops the OmniRoute-specific
 Responses tool-protocol downgrade (LiteLLM is expected to handle tool-protocol
-translation) and the `unknown-<origin>` sentinel routing (an OmniRoute-only
-observability feature).
+translation). The historic `unknown-<origin>` sentinel — which rerouted
+unmatched tier requests to a phantom combo purely so OmniRoute's comboName
+would record them as unknown — is replaced by a lighter LiteLLM equivalent:
+unmatched requests stay on their original combo but get a
+`metadata["traffic_router"] = "unknown"` tag that LiteLLM logs into the spend
+row, so they're attributable as unknown without defining extra model groups.

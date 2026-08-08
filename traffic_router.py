@@ -15,7 +15,7 @@ Routing table (decision order, first match wins):
   system/developer marker: guardian review      -> security   (header fallback)
   system marker: title / branch                 -> cheap
   system marker: known main coding turn         -> unchanged
-  anything else                                 -> unchanged   (stays on its combo)
+  anything else                                 -> unchanged, but tagged unknown
 
 `security` and `cheap` resolve via the model_group_alias in LiteLLM's
 router_settings (e.g. security -> luna).
@@ -184,7 +184,15 @@ class TrafficRouter(CustomLogger):
             if marker in prompt:
                 return data
 
-        # Unmatched tier request — leave it on its original combo.
+        # Unmatched tier request — keep it on its original combo but tag it
+        # unknown for spend attribution. This mirrors the historic hook's
+        # unknown-<origin> sentinel combo (same backends, but recorded as
+        # unknown) without needing a separate model group per tier: LiteLLM
+        # logs data["metadata"] into the spend row, so the model_group still
+        # names the origin (luna/terra/sol) while this tag flags it unmatched.
+        metadata = data.get("metadata") or {}
+        metadata["traffic_router"] = "unknown"
+        data["metadata"] = metadata
         return data
 
 
