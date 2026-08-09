@@ -7,21 +7,24 @@ hook preserved in historic/cc-background-to-luna.js. Only `data["model"]` is
 rewritten; the request body is never modified (LiteLLM handles tool-protocol
 translation itself, so the old Responses-downgrade mangling was not ported).
 
-Routing table (decision order, first match wins). Tier-routed requests that are
-NOT main coding turns are tagged `traffic_router:<security|cheap|unknown>` in
-metadata["tags"], so each kind is distinguishable in the proxy logs UI's Tags
-column even when several share one session or resolve to the same underlying
-backend (e.g. security and cheap both land on deepseek-v4-flash-low). Main coding
-turns are deliberately left untagged: a row without a traffic_router tag IS a
-main turn.
+Routing table (decision order, first match wins). Classification runs on EVERY
+request regardless of the model name sent — Codex does not always send a bare
+tier slug (its auto-approval reviewer requests fully-qualified ids like
+'gpt-5.6-luna'), so the tier name is not used to gate classification. Requests
+that are NOT main coding turns are tagged
+`traffic_router:<security|cheap|unknown>` in metadata["tags"], so each kind is
+distinguishable in the proxy logs UI's Tags column even when several share one
+session or resolve to the same underlying backend (e.g. security and cheap both
+land on deepseek-v4-flash-low). Main coding turns are deliberately left
+untagged: a row without a traffic_router tag IS a main turn.
   codex-auto-review model                       -> security   [tag: security]
-  requested model not a tier (luna/terra/sol)   -> unchanged  [not tagged]
   x-openai-subagent: guardian header            -> security   [tag: security]
   system/developer marker: security monitor     -> security   [tag: security]
   system/developer marker: guardian review      -> security   [tag: security]
   system marker: title / branch                 -> cheap      [tag: cheap]
   system marker: known main coding turn         -> unchanged  [not tagged; main]
-  anything else                                 -> unchanged  [tag: unknown]
+  unmatched + bare tier slug (luna/terra/sol)   -> unchanged  [tag: unknown]
+  anything else (direct provider model ID)      -> unchanged  [not tagged]
 
 `security` and `cheap` resolve via the model_group_alias in LiteLLM's
 router_settings (e.g. security -> luna).
@@ -213,15 +216,14 @@ class TrafficRouter(CustomLogger):
             _stash_tag(data, "security")
             return data
 
-        # Only tier routing models are intercepted. A direct provider model ID
-        # (e.g. "antigravity/gemini-3.1-flash-lite", "zai/glm-5.2") is left
-        # alone, and not tagged — it is a direct, intentionally un-routed call.
-        if requested not in TIER_MODELS:
-            return data
-
-        # From here every non-main path is tier-routed and gets a traffic_router
-        # tag so each kind is distinguishable in spend logs. Determine the tag
-        # (and any model rewrite), then stamp it once below.
+        # Classify EVERY request, regardless of the model name the client sent.
+        # Codex does not always send a bare tier slug: its auto-approval
+        # reviewer, for instance, requests a fully-qualified id like
+        # 'gpt-5.6-luna'. A bare-tier-only gate here would pass that through
+        # untouched and the proxy would reject it with 'Invalid model name'
+        # before the Codex classification below ever ran. So run the
+        # classification first; only requests that classify as nothing fall
+        # through to the bare-tier / direct-provider-ID handling.
         new_model = None
         tag = "unknown"
 
@@ -246,14 +248,23 @@ class TrafficRouter(CustomLogger):
                 # common/baseline case; only background and unmatched requests
                 # are tagged, so an untagged row in spend logs IS a main turn.
                 return data
-            # else: unmatched tier request — keep it on its original combo but
-            # tag it unknown. This mirrors the historic hook's unknown-<origin>
-            # sentinel combo (same backends, recorded as unknown) without a
-            # separate model group per tier.
+            # else: unmatched — handled by the tier gate below.
 
         if new_model is not None:
+            # A classified background request always rewrites to its combo,
+            # even when the client sent a non-tier model name (e.g. the Codex
+            # auto-reviewer's 'gpt-5.6-luna' -> security).
             data["model"] = new_model
-        _stash_tag(data, tag)
+            _stash_tag(data, tag)
+            return data
+
+        # Nothing matched. A bare tier slug stays on its combo and is tagged
+        # unknown so the unmatched request is still discoverable in spend logs.
+        # Anything else is a direct provider model ID (e.g.
+        # "antigravity/gemini-3.1-flash-lite", "zai/glm-5.2") — left alone and
+        # not tagged, a direct, intentionally un-routed call.
+        if requested in TIER_MODELS:
+            _stash_tag(data, "unknown")
         return data
 
     async def async_logging_hook(
