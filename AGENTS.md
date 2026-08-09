@@ -9,6 +9,7 @@ container loads it from its config volume at startup.
 | In this repo | In the live container |
 | --- | --- |
 | `traffic_router.py` | `/app/config/traffic_router.py` |
+| `recon.py` | *(not deployed — runs on the host, reads the config volume)* |
 
 The container's config volume `litellm-config` (Incus storage pool `containers`)
 is mounted at `/app/config`. Its host-side path is:
@@ -34,7 +35,14 @@ LiteLLM looks for `traffic_router.py` in the config-file directory.
 cp traffic_router.py \
   /mnt/data/containers-backed/custom/default_litellm-config/traffic_router.py
 
-# 2. Verify it imports cleanly in the container before restarting.
+# 2. Run the offline harness before restarting — an import check does not prove
+#    routing, tagging or capture work, and a bad restart costs ~25s of downtime.
+cp test_traffic_router.py \
+  /mnt/data/containers-backed/custom/default_litellm-config/
+incus exec litellm -- /app/.venv/bin/python /app/config/test_traffic_router.py
+rm /mnt/data/containers-backed/custom/default_litellm-config/test_traffic_router.py
+
+# 3. Verify it imports cleanly in the container before restarting.
 incus exec litellm -- /app/.venv/bin/python -c "
 import importlib.util, os
 d='/app/config'; f=os.path.join(d,'traffic_router.py')
@@ -43,10 +51,10 @@ mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
 print('loaded OK ->', mod.handler)
 "
 
-# 3. Restart the proxy to pick up the changed hook.
+# 4. Restart the proxy to pick up the changed hook.
 incus restart litellm --force
 
-# 4. Wait for readiness.
+# 5. Wait for readiness.
 for i in $(seq 1 25); do
   incus exec litellm -- /app/.venv/bin/python -c \
     "import urllib.request; urllib.request.urlopen('http://[::1]:80/health/readiness', timeout=2).read()" \
@@ -74,16 +82,35 @@ must map each tier name to a callable `model_name`. The live config uses aliases
 ```jsonc
 // LiteLLM_Config.param_value["router_settings"]["model_group_alias"]
 {
-  "sol":      "zai/glm-5.2-max",
-  "terra":    "zai/glm-5.2",
-  "luna":     "deepseek/deepseek-v4-flash",
-  "cheap":    "deepseek/deepseek-v4-flash-low",
-  "security": "deepseek/deepseek-v4-flash-low"
+  "sol":           "zai/glm-5.2-max",
+  "terra":         "zai/glm-5.2",
+  "security":      "cheap",
+  "unknown-sol":   "zai/glm-5.2-max",   // sentinel groups: same backend as the
+  "unknown-terra": "zai/glm-5.2",       // real tier, but filterable in the UI
+  "unknown-luna":  "luna"
 }
 ```
 
 If a tier call returns `400 Invalid model name`, the alias/group config is
-missing — not a hook problem.
+missing — not a hook problem. The `unknown-*` sentinels must exist for every
+tier listed in the hook's `SENTINEL_TIERS`, or unmatched traffic 400s.
+
+Edit aliases through the proxy's own API rather than the DB — it merges,
+applies live, and writes an audit log. `model_group_alias` is replaced
+wholesale, so send the complete map:
+
+```sh
+MK=$(incus exec litellm -- sh -c 'echo "$LITELLM_MASTER_KEY"')
+incus exec litellm -- /app/.venv/bin/python -c "
+import urllib.request, json
+alias={'sol':'zai/glm-5.2-max','terra':'zai/glm-5.2','security':'cheap',
+       'unknown-luna':'luna','unknown-terra':'zai/glm-5.2','unknown-sol':'zai/glm-5.2-max'}
+req=urllib.request.Request('http://[::1]:80/config/update',
+  data=json.dumps({'router_settings':{'model_group_alias':alias}}).encode(),
+  headers={'Authorization':'Bearer $MK','Content-Type':'application/json'})
+print(urllib.request.urlopen(req,timeout=30).read().decode())
+"
+```
 
 ### End-to-end test
 
@@ -126,8 +153,29 @@ ORDER BY "startTime" DESC LIMIT 2;'
 Expected: both rows show `model_group = security` and a `request_tags` array
 containing `"traffic_router:security"`. A main turn (a `system` message
 beginning `You are Claude Code, Anthropic's official CLI`) should show
-`model_group` unchanged and **no** `traffic_router:` tag. An unmatched request
-shows `model_group` unchanged and `"traffic_router:unknown"`.
+`model_group` unchanged and **no** `traffic_router:` tag. An unmatched tier
+request shows `model_group = unknown-<tier>`, `"traffic_router:unknown"` and a
+`"traffic_router_fp:<fp8>"` tag.
+
+Check `call_type` alongside `model_group`: the two ingress routes log as
+`acompletion` and `anthropic_messages`, and the `model_group` restore only
+matters on the former. A row with a `traffic_router:` tag but a blank
+`model_group` means that restore regressed.
+
+### Recon capture
+
+```sh
+./recon.py status        # is capture armed? how many records?
+./recon.py on            # arm (writes recon.json on the config volume)
+./recon.py list          # captured callers, clustered by fingerprint
+./recon.py off && ./recon.py clear
+```
+
+Runs on the host against
+`/mnt/data/containers-backed/custom/default_litellm-config/` — override with
+`--config-dir` or `$TRAFFIC_ROUTER_CONFIG_DIR`. Arming takes effect within ~3s
+with no restart. Verify a capture landed by arming, sending an unmatched
+request, and checking `./recon.py list` shows it.
 
 ## Gotchas learned from live deploys
 
@@ -151,6 +199,15 @@ shows `model_group` unchanged and `"traffic_router:unknown"`.
   `claude-cli` path) is invisible if you verify only `/v1/chat/completions`.
   Confirm real client traffic with
   `metadata->>'user_api_key_alias' = 'CC Switch Claude'`.
+- **`model_group` is NOT read from the standard logging object.** Unlike
+  `request_tags`, the spend row takes it from the litellm metadata bucket
+  (`spend_tracking_utils.get_logging_payload`). A pre-call rewrite of
+  `data["model"]` blanks it on the `/v1/chat/completions` (`acompletion`) path;
+  `/v1/messages` and `/responses` are unaffected. The logging hook writes it
+  back into the metadata bucket — editing only the log object looks correct and
+  silently does nothing.
+- **Recon capture must never raise.** It runs inside the request path, so every
+  capture path is wrapped in a bare `except`.
 - **The slim LiteLLM image has no `curl`/`wget`.** Use
   `/app/.venv/bin/python -c "import urllib.request; ..."` for in-container HTTP.
 - **`incus exec` does not propagate host env vars** into the container — read

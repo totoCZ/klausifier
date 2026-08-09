@@ -35,11 +35,13 @@ that stamps a `traffic_router:<verdict>` tag onto each spend row (see below).
 | Claude title or branch task | `system` marker | `cheap` | `traffic_router:cheap` |
 | Claude main turn or working SDK subagent | Identity marker | unchanged | *(none — main)* |
 | Codex main turn | Developer instruction identity marker | unchanged | *(none — main)* |
-| Other tier request | No recognized signal | unchanged | `traffic_router:unknown` |
+| Other tier request | No recognized signal | `unknown-<tier>` | `traffic_router:unknown` + `traffic_router_fp:<fp>` |
 
-`security` and `cheap` are virtual names that resolve via the
-`model_group_alias` in LiteLLM's `router_settings` (e.g. `security -> luna`).
-Configure those aliases on the LiteLLM side; this hook only emits the names.
+`security`, `cheap` and `unknown-<tier>` are virtual names that resolve via the
+`model_group_alias` in LiteLLM's `router_settings` (e.g. `security -> cheap`,
+`unknown-luna -> luna`). Configure those aliases on the LiteLLM side; this hook
+only emits the names. A missing alias makes the proxy answer *Invalid model
+name*, so keep `SENTINEL_TIERS` in the hook in sync with the aliases.
 
 ## Signals
 
@@ -80,6 +82,63 @@ ingress routes (`/v1/chat/completions`, `/v1/messages`) carry metadata in
 different buckets. Writing tags pre-call silently loses them on one route; the
 logging hook edits `request_tags` directly and works for both.
 
+### Finding unmatched traffic
+
+The logs UI **cannot filter by tag** — LiteLLM 1.95.0's `/spend/logs/ui` filters
+on api key, user, request/session/team id, spend, date, status, model, model id,
+**model group**, key alias, end user and error, but `request_tags` is exposed
+only through the aggregate tag endpoints. A tag alone is therefore invisible
+until you drill into a row.
+
+`model_group` *is* filterable, so unmatched tier requests are routed to a
+sentinel group `unknown-<tier>` aliased to the same backend as the real tier —
+identical cost and behaviour, but filterable in one click, and it still records
+which tier the request came from. (This restores the `unknown-<origin>` sentinel
+the original OmniRoute hook used.)
+
+Rewriting `data["model"]` in a pre-call hook makes LiteLLM drop `model_group`
+from the spend row on the `/v1/chat/completions` path — it reads that field from
+the litellm metadata bucket rather than the standard logging object, unlike
+`request_tags`. The logging hook restores it, which also fixed the same
+pre-existing blank on `security`/`cheap` rows.
+
+Unmatched rows additionally carry `traffic_router_fp:<fp8>`, a fingerprint of
+the caller (first line of the operator prompt + user-agent product token) that
+is stable across sessions and version bumps. Recurring unknown agents therefore
+share one id instead of looking like unrelated one-offs.
+
+## Debugging: writing a profile for a new agent
+
+LiteLLM records nothing you can profile an unknown agent from: with
+`store_prompts_in_spend_logs` off, `proxy_server_request` and `messages` are
+literally `{}` in every spend row, and turning it on stores rendered messages —
+never headers, tool definitions, or body structure.
+
+So the hook has an on-demand capture sink, and `recon.py` drives it:
+
+```sh
+./recon.py on            # arm: unknowns only, 50 records, auto-off after 30 min
+# ...run the new agent once...
+./recon.py list          # distinct callers, clustered by fingerprint
+./recon.py show <fp>     # full inbound shape: headers, system, tools, body keys
+./recon.py suggest <fp>  # marker candidates, session-specific lines rejected
+./recon.py off
+```
+
+`suggest` intersects the prompt lines across every capture of that fingerprint,
+so per-session noise (cwd, date, branch) drops out and what remains is the
+identity sentence you want as a marker. Paste it into `SECURITY_MARKERS`,
+`CHEAP_MARKERS` or `MAIN_TURN_MARKERS` and redeploy.
+
+Capture is armed by a flag file (`recon.json` on the config volume) that the
+hook re-stats at most every 3 seconds — no restart, and one cached stat per
+request when disarmed. It self-disables after `max_records` or `expire_minutes`,
+so a forgotten session cannot run away. `Authorization`, `x-api-key` and
+anything whose header name looks like a credential are replaced with a length
+marker; user message content is summarised to role/type/size rather than stored,
+since the router never reads it anyway. Other commands: `status`, `watch`
+(live tail), `clear`.
+
 ## Install
 
 `traffic_router.py` lives next to the LiteLLM `config.yaml` (the config volume).
@@ -107,6 +166,9 @@ Port of an earlier OmniRoute middleware hook.
 `historic/cc-background-to-luna.js` is the original (preserved verbatim);
 `historic/test-hook.js` is its regression test. The port carries over the
 routing decisions but drops the OmniRoute-specific Responses tool-protocol
-downgrade (LiteLLM handles tool translation) and replaces the historic
-`unknown-<origin>` phantom-combo sentinel with a `traffic_router:unknown` tag
-on the original combo.
+downgrade (LiteLLM handles tool translation). The historic `unknown-<origin>`
+phantom-combo sentinel is kept — it turned out to be the only way to make
+unmatched traffic filterable in the LiteLLM UI — and is now paired with a
+`traffic_router:unknown` tag. `recon.py` is the successor to the OmniRoute-era
+`classify.py`, which could read OmniRoute's per-request call logs; LiteLLM keeps
+no equivalent, hence the capture sink in the hook.
