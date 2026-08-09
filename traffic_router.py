@@ -17,37 +17,35 @@ tier slug (its auto-approval reviewer requests fully-qualified ids like
   system/developer marker: guardian review      -> security     [tag: security]
   system marker: title / branch                 -> cheap        [tag: cheap]
   system marker: known main coding turn         -> unchanged    [not tagged; main]
-  unmatched + bare tier slug (luna/terra/sol)   -> unknown-<tier> [tag: unknown]
+  unmatched + bare tier slug (luna/terra/sol)   -> unchanged    [tag: unknown]
   anything else (direct provider model ID)      -> unchanged    [not tagged]
 
 `security` and `cheap` resolve via the model_group_alias in LiteLLM's
 router_settings (e.g. security -> cheap).
 
-## Why unmatched requests get a sentinel model group
+## Finding unmatched traffic (and why there is no sentinel model group)
 
-LiteLLM 1.95.0's logs UI and `/spend/logs/ui` cannot filter by tag — the
-filterable fields are api_key, user_id, request_id, session_id, team_id, spend,
-dates, status, model, model_id, model_group, key_alias, end_user, error_code and
-error_message. `request_tags` is only exposed through the aggregate tag
-endpoints. So a `traffic_router:unknown` tag alone is invisible until you drill
-into an individual row.
+LiteLLM 1.95.0's logs UI cannot filter by tag, so a `traffic_router:unknown` tag
+is invisible until you open an individual row. The obvious workaround —
+rewriting unmatched requests to a sentinel `unknown-<tier>` model group, the
+trick the original OmniRoute hook used — does NOT work here, and was tried and
+reverted. The Logs filter panel only ever sends `key_alias`, `model_id`,
+`end_user`, `user_id`, `team_id`, `request_id`, `session_id`, `error_code`,
+`error_message` and status; `model_group` is never sent, and it is not a column
+in the logs table either (it appears only in the row detail panel — the same
+drilldown the sentinel was supposed to avoid). `/spend/logs/ui` accepts a
+`model_group` filter, but nothing in the UI produces one.
 
-`model_group`, however, IS filterable, and the spend row records the *alias*
-name rather than the resolved deployment. So unmatched bare-tier requests are
-rewritten to a sentinel group `unknown-<tier>`, aliased in router_settings to
-the exact same target as the real tier:
+The Model filter is populated from real deployments (label `model_name`, value
+`model_id`), so making the sentinels filterable would mean creating duplicate
+deployments rather than aliases — three more configs to keep in sync with the
+tier deployments. Not worth it: use recon.py, or query the spend rows directly.
 
-    "unknown-luna":  "luna", "unknown-terra": "zai/glm-5.2",
-    "unknown-sol":   "zai/glm-5.2-max"
-
-Same backend, same cost, but unmatched traffic is now filterable in the UI and
-still records which tier it came from. This is the same sentinel-combo trick the
-OmniRoute hook used (`unknown-<origin>`), which is what made the old classify.py
-recon script work off comboName alone.
-
-If a sentinel alias is missing from router_settings the proxy would answer
-"Invalid model name", so the rewrite is applied only to tiers listed in
-`SENTINEL_TIERS`; keep that in sync with the aliases.
+    SELECT to_char("startTime",'HH24:MI') t, model, request_tags
+    FROM "LiteLLM_SpendLogs"
+    WHERE request_tags::text LIKE '%traffic_router:unknown%'
+      AND "startTime" > now() - interval '1 day'
+    ORDER BY "startTime" DESC;
 
 ## Tagging
 
@@ -102,13 +100,6 @@ from litellm.integrations.custom_logger import CustomLogger
 from litellm.proxy._types import UserAPIKeyAuth
 
 TIER_MODELS = ("luna", "terra", "sol")
-
-# Tiers that have an `unknown-<tier>` sentinel alias in router_settings. An
-# unmatched request on one of these is rewritten to its sentinel so it is
-# filterable by model_group in the logs UI. A tier missing from here still gets
-# the `unknown` tag but keeps its own model group.
-SENTINEL_TIERS = ("luna", "terra", "sol")
-SENTINEL_PREFIX = "unknown-"
 
 # Substring markers, matched against lower-cased system/instruction/developer
 # text. Order within each list is not significant; the SECURITY list is checked
@@ -566,14 +557,13 @@ class TrafficRouter(CustomLogger):
             # tagged, so an untagged row in spend logs IS a main turn.
             return None, "main", prompt
 
-        # Nothing matched. A bare tier slug goes to its `unknown-<tier>`
-        # sentinel group so it is filterable by model_group in the logs UI, and
-        # is tagged unknown. Anything else is a direct provider model ID (e.g.
+        # Nothing matched. A bare tier slug stays on its own combo and is
+        # tagged unknown so the unmatched request is still discoverable.
+        # Anything else is a direct provider model ID (e.g.
         # "antigravity/gemini-3.1-flash-lite", "zai/glm-5.2") — left alone and
         # not tagged, a direct, intentionally un-routed call.
         if requested in TIER_MODELS:
-            sentinel = SENTINEL_PREFIX + requested if requested in SENTINEL_TIERS else None
-            return sentinel, "unknown", prompt
+            return None, "unknown", prompt
         return None, "direct", prompt
 
     async def async_pre_call_hook(
@@ -595,16 +585,18 @@ class TrafficRouter(CustomLogger):
 
         if new_model is not None:
             data["model"] = new_model
-            # A pre-call rewrite of data["model"] makes LiteLLM 1.95.0 drop
-            # model_group from the spend row on the /v1/chat/completions
-            # (acompletion) path — verified against a no-rewrite control, which
-            # records it fine. /v1/messages and /responses are unaffected.
-            # Stash the group we routed to so async_logging_hook can restore it;
-            # without this the sentinel groups (and security/cheap) would be
-            # unfilterable in the UI for OpenAI-format clients.
-            _stash(data, _GROUP_KEY, new_model)
         if verdict in ("security", "cheap", "unknown"):
             _stash(data, _TAG_KEY, verdict)
+            # Stashing itself is what costs us model_group on the
+            # /v1/chat/completions path: LiteLLM's
+            # get_litellm_metadata_from_kwargs returns `litellm_metadata` if it
+            # exists and only falls back to `metadata`, but that route carries
+            # model_group in `metadata` — so creating a litellm_metadata bucket
+            # here shadows it and the spend row logs a blank group. Stash the
+            # effective group (rewritten or as requested) so async_logging_hook
+            # can put it back. Requests we do not stash are unaffected, which is
+            # why untagged main turns always recorded their group correctly.
+            _stash(data, _GROUP_KEY, data.get("model") or "")
 
         fp = ""
         if verdict == "unknown":
@@ -639,7 +631,7 @@ class TrafficRouter(CustomLogger):
         if not isinstance(slo, dict):
             return kwargs, result
 
-        # Restore the model group the pre-call rewrite cost us (see _GROUP_KEY).
+        # Restore the model group our own stash shadowed (see _GROUP_KEY).
         # The spend row reads model_group from the litellm metadata bucket
         # (spend_tracking_utils.get_logging_payload: `metadata.get("model_group")`),
         # NOT from the standard_logging_object — unlike request_tags, which

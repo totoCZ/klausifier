@@ -93,9 +93,9 @@ for label, data, exp_model, exp_verdict in [
     ("security marker", req("luna", SEC), "security", "security"),
     ("cheap marker", req("terra", "Generate a concise, sentence-case title"), "cheap", "cheap"),
     ("main turn", req("sol", MAIN), None, "main"),
-    ("unknown luna", req("luna", "You are Fancy New Agent v3."), "unknown-luna", "unknown"),
-    ("unknown terra (no system)", req("terra"), "unknown-terra", "unknown"),
-    ("unknown sol", req("sol", "blah"), "unknown-sol", "unknown"),
+    ("unknown luna", req("luna", "You are Fancy New Agent v3."), None, "unknown"),
+    ("unknown terra (no system)", req("terra"), None, "unknown"),
+    ("unknown sol", req("sol", "blah"), None, "unknown"),
     ("direct provider id", req("zai/glm-5.2", "whatever"), None, "direct"),
 ]:
     nm, verdict, _ = m.handler._classify(data)
@@ -130,7 +130,7 @@ data = req("luna", "You are Fancy New Agent v3. Do things.",
                     "authorization": "Bearer sk-supersecret", "x-api-key": "sk-abc123"},
            tools=[{"function": {"name": "shell"}}], stream=True)
 out = call(data)
-check(out["model"] == "unknown-luna", "recon: request still routed while capturing")
+check(out["model"] == "luna", "recon: unmatched request left on its own combo")
 check(len(records()) == 1, "recon: one record captured", f"{len(records())}")
 
 rec = json.load(open(os.path.join(DIR, records()[0])))
@@ -138,7 +138,7 @@ blob = json.dumps(rec)
 check("sk-supersecret" not in blob and "sk-abc123" not in blob, "recon: secrets redacted")
 check(rec["headers"]["x-openai-subagent"] == "guardian-ish", "recon: custom headers preserved")
 check(rec["tools"] == ["shell"], "recon: tool names captured")
-check(rec["requested_model"] == "luna" and rec["routed_model"] == "unknown-luna",
+check(rec["requested_model"] == "luna" and rec["routed_model"] == "luna",
       "recon: requested and routed model recorded")
 
 call(req("luna", MAIN))
@@ -180,7 +180,11 @@ tags = slo["request_tags"]
 check("traffic_router:unknown" in tags, "logging: unknown tag added")
 check(any(t.startswith("traffic_router_fp:") for t in tags), "logging: fingerprint tag added")
 check("Credential: X" in tags, "logging: pre-existing tags preserved")
-check(meta.get("model_group") == "unknown-luna", "logging: blank model_group restored",
+check(meta.get("model_group") == "luna",
+      "logging: unmatched request's own group restored", str(meta.get("model_group")))
+
+slo, meta = logged(req("luna", SEC))
+check(meta.get("model_group") == "security", "logging: rewritten group restored",
       str(meta.get("model_group")))
 
 slo, meta = logged(req("luna", SEC), existing_group="already-set")

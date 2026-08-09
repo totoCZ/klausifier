@@ -35,13 +35,11 @@ that stamps a `traffic_router:<verdict>` tag onto each spend row (see below).
 | Claude title or branch task | `system` marker | `cheap` | `traffic_router:cheap` |
 | Claude main turn or working SDK subagent | Identity marker | unchanged | *(none — main)* |
 | Codex main turn | Developer instruction identity marker | unchanged | *(none — main)* |
-| Other tier request | No recognized signal | `unknown-<tier>` | `traffic_router:unknown` + `traffic_router_fp:<fp>` |
+| Other tier request | No recognized signal | unchanged | `traffic_router:unknown` + `traffic_router_fp:<fp>` |
 
-`security`, `cheap` and `unknown-<tier>` are virtual names that resolve via the
-`model_group_alias` in LiteLLM's `router_settings` (e.g. `security -> cheap`,
-`unknown-luna -> luna`). Configure those aliases on the LiteLLM side; this hook
-only emits the names. A missing alias makes the proxy answer *Invalid model
-name*, so keep `SENTINEL_TIERS` in the hook in sync with the aliases.
+`security` and `cheap` are virtual names that resolve via the
+`model_group_alias` in LiteLLM's `router_settings` (e.g. `security -> cheap`).
+Configure those aliases on the LiteLLM side; this hook only emits the names.
 
 ## Signals
 
@@ -84,28 +82,41 @@ logging hook edits `request_tags` directly and works for both.
 
 ### Finding unmatched traffic
 
-The logs UI **cannot filter by tag** — LiteLLM 1.95.0's `/spend/logs/ui` filters
-on api key, user, request/session/team id, spend, date, status, model, model id,
-**model group**, key alias, end user and error, but `request_tags` is exposed
-only through the aggregate tag endpoints. A tag alone is therefore invisible
-until you drill into a row.
+The logs UI **cannot filter by tag**, and there is no way to make it. This was
+measured, not assumed:
 
-`model_group` *is* filterable, so unmatched tier requests are routed to a
-sentinel group `unknown-<tier>` aliased to the same backend as the real tier —
-identical cost and behaviour, but filterable in one click, and it still records
-which tier the request came from. (This restores the `unknown-<origin>` sentinel
-the original OmniRoute hook used.)
+- `/spend/logs/ui` filters on api key, user, request/session/team id, spend,
+  date, status, model, model id, **model group**, key alias, end user and error.
+  `request_tags` is exposed only through the aggregate tag endpoints.
+- The Logs **filter panel** only ever sends `key_alias`, `model_id`, `end_user`,
+  `user_id`, `team_id`, `request_id`, `session_id`, `error_code`,
+  `error_message` and status. It never sends `model_group`, even though the
+  endpoint accepts it.
+- The logs **table** has no `model_group` column either. It appears only in the
+  row detail panel — i.e. behind the same drilldown.
 
-Rewriting `data["model"]` in a pre-call hook makes LiteLLM drop `model_group`
-from the spend row on the `/v1/chat/completions` path — it reads that field from
-the litellm metadata bucket rather than the standard logging object, unlike
-`request_tags`. The logging hook restores it, which also fixed the same
-pre-existing blank on `security`/`cheap` rows.
+Routing unmatched requests to a sentinel `unknown-<tier>` model group (the trick
+the original OmniRoute hook used) was tried and reverted for exactly this
+reason: the UI never filters on that field, so it bought nothing. The Model
+filter is fed by real deployments (label `model_name`, value `model_id`), so a
+filterable sentinel would have to be a duplicate *deployment* per tier, kept in
+sync with the real one — not worth it.
 
-Unmatched rows additionally carry `traffic_router_fp:<fp8>`, a fingerprint of
-the caller (first line of the operator prompt + user-agent product token) that
-is stable across sessions and version bumps. Recurring unknown agents therefore
-share one id instead of looking like unrelated one-offs.
+So finding unmatched traffic is a CLI job:
+
+```sql
+SELECT to_char("startTime",'HH24:MI') t, model, request_tags
+FROM "LiteLLM_SpendLogs"
+WHERE request_tags::text LIKE '%traffic_router:unknown%'
+  AND "startTime" > now() - interval '1 day'
+ORDER BY "startTime" DESC;
+```
+
+Unmatched rows carry `traffic_router_fp:<fp8>`, a fingerprint of the caller
+(first line of the operator prompt + user-agent product token) that is stable
+across sessions and version bumps. Recurring unknown agents therefore share one
+id instead of looking like unrelated one-offs, both in that query and in the
+Tags column.
 
 ## Debugging: writing a profile for a new agent
 

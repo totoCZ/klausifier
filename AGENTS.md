@@ -82,18 +82,14 @@ must map each tier name to a callable `model_name`. The live config uses aliases
 ```jsonc
 // LiteLLM_Config.param_value["router_settings"]["model_group_alias"]
 {
-  "sol":           "zai/glm-5.2-max",
-  "terra":         "zai/glm-5.2",
-  "security":      "cheap",
-  "unknown-sol":   "zai/glm-5.2-max",   // sentinel groups: same backend as the
-  "unknown-terra": "zai/glm-5.2",       // real tier, but filterable in the UI
-  "unknown-luna":  "luna"
+  "sol":      "zai/glm-5.2-max",
+  "terra":    "zai/glm-5.2",
+  "security": "cheap"
 }
 ```
 
 If a tier call returns `400 Invalid model name`, the alias/group config is
-missing — not a hook problem. The `unknown-*` sentinels must exist for every
-tier listed in the hook's `SENTINEL_TIERS`, or unmatched traffic 400s.
+missing — not a hook problem.
 
 Edit aliases through the proxy's own API rather than the DB — it merges,
 applies live, and writes an audit log. `model_group_alias` is replaced
@@ -103,8 +99,7 @@ wholesale, so send the complete map:
 MK=$(incus exec litellm -- sh -c 'echo "$LITELLM_MASTER_KEY"')
 incus exec litellm -- /app/.venv/bin/python -c "
 import urllib.request, json
-alias={'sol':'zai/glm-5.2-max','terra':'zai/glm-5.2','security':'cheap',
-       'unknown-luna':'luna','unknown-terra':'zai/glm-5.2','unknown-sol':'zai/glm-5.2-max'}
+alias={'sol':'zai/glm-5.2-max','terra':'zai/glm-5.2','security':'cheap'}
 req=urllib.request.Request('http://[::1]:80/config/update',
   data=json.dumps({'router_settings':{'model_group_alias':alias}}).encode(),
   headers={'Authorization':'Bearer $MK','Content-Type':'application/json'})
@@ -154,13 +149,13 @@ Expected: both rows show `model_group = security` and a `request_tags` array
 containing `"traffic_router:security"`. A main turn (a `system` message
 beginning `You are Claude Code, Anthropic's official CLI`) should show
 `model_group` unchanged and **no** `traffic_router:` tag. An unmatched tier
-request shows `model_group = unknown-<tier>`, `"traffic_router:unknown"` and a
+request keeps its own `model_group` and shows `"traffic_router:unknown"` plus a
 `"traffic_router_fp:<fp8>"` tag.
 
 Check `call_type` alongside `model_group`: the two ingress routes log as
 `acompletion` and `anthropic_messages`, and the `model_group` restore only
-matters on the former. A row with a `traffic_router:` tag but a blank
-`model_group` means that restore regressed.
+matters on the former. A `security` or `cheap` row with a blank `model_group`
+means that restore regressed.
 
 ### Recon capture
 
