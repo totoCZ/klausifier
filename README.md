@@ -12,11 +12,11 @@ Routes coding-agent traffic (Claude Code, Codex CLI) through a [LiteLLM](https:/
 proxy by rewriting which model/combo each request targets — before LiteLLM
 resolves it and load-balances upstream.
 
-The hook classifies known background work (security reviews, title/branch
-generation) and sends it to cheaper combos, while preserving main coding turns.
-It only intercepts requests whose routing model is `luna`, `terra`, or `sol`;
-direct provider model IDs and other combo names remain untouched. Only the model
-name is rewritten — the request body is never modified.
+The hook classifies every request by header and prompt markers: known background
+work (security reviews, title/branch generation) goes to cheaper combos, while
+main coding turns are preserved. Only the model name is rewritten — the request
+body is never modified. Requests sent to a direct provider model ID (no tier
+signal) pass through untouched.
 
 ## Routing behavior
 
@@ -69,21 +69,16 @@ inspected. A user message cannot imitate an identity marker to evade routing.
 
 ## Spend attribution (tags)
 
-Each non-main tier-routed request is tagged `traffic_router:<security|cheap|unknown>`
-so background and unmatched requests are distinguishable in the LiteLLM logs UI
-Tags column even when several share a session or resolve to the same underlying
-backend (e.g. `security` and `cheap` both land on `deepseek-v4-flash-low`). Main
-coding turns are deliberately left untagged — a row without a `traffic_router:` tag
-IS a main turn.
+Each non-main request is tagged `traffic_router:<security|cheap|unknown>` so
+background and unmatched requests are distinguishable in the LiteLLM logs UI
+Tags column. Main coding turns are deliberately untagged — a row without a
+`traffic_router:` tag IS a main turn.
 
-The tag is stamped in `async_logging_hook`, not the pre-call hook: LiteLLM
-builds the spend row's `request_tags` list at log time from a snapshot of
-`standard_logging_object`, and the `/v1/messages` route carries request metadata
-in a different bucket (`litellm_metadata`) than `/v1/chat/completions`
-(`metadata`). Writing tags in the pre-call hook silently loses them on one of
-the two routes; the logging hook runs after that snapshot is built and edits
-`request_tags` directly, so it works for both. The pre-call hook stashes the
-classification on `metadata` and the logging hook reads it back.
+The tag is stamped in `async_logging_hook` (not the pre-call hook) because
+LiteLLM materializes the spend row's `request_tags` at log time, and the two
+ingress routes (`/v1/chat/completions`, `/v1/messages`) carry metadata in
+different buckets. Writing tags pre-call silently loses them on one route; the
+logging hook edits `request_tags` directly and works for both.
 
 ## Install
 
@@ -108,14 +103,10 @@ procedure and the SQL to confirm a tag landed in the spend row's `request_tags`.
 
 ## History
 
-This is a port of an earlier OmniRoute middleware hook.
-`historic/cc-background-to-luna.js` is the original OmniRoute runtime hook,
-preserved verbatim for reference; `historic/test-hook.js` is its regression test.
-The port carries over the routing decisions but drops the OmniRoute-specific
-Responses tool-protocol downgrade (LiteLLM is expected to handle tool-protocol
-translation). The historic `unknown-<origin>` sentinel — which rerouted
-unmatched tier requests to a phantom combo purely so OmniRoute's comboName
-would record them as unknown — is replaced by a lighter LiteLLM equivalent:
-unmatched requests stay on their original combo but get a `traffic_router:unknown`
-tag in the spend row's `request_tags` (see *Spend attribution* above), so they
-are attributable as unknown without defining extra model groups.
+Port of an earlier OmniRoute middleware hook.
+`historic/cc-background-to-luna.js` is the original (preserved verbatim);
+`historic/test-hook.js` is its regression test. The port carries over the
+routing decisions but drops the OmniRoute-specific Responses tool-protocol
+downgrade (LiteLLM handles tool translation) and replaces the historic
+`unknown-<origin>` phantom-combo sentinel with a `traffic_router:unknown` tag
+on the original combo.

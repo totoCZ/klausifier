@@ -140,16 +140,13 @@ shows `model_group` unchanged and `"traffic_router:unknown"`.
   `model_group_alias`. A clean-looking boot log is not proof groups loaded;
   always confirm with a live tier call.
 - **Tags go in `request_tags` via `async_logging_hook`, NOT in the pre-call hook.**
-  The logs UI Tags column and the spend row's `request_tags` field are built at
-  log time from `standard_logging_object["request_tags"]`. A pre-call hook that
-  writes to `data["metadata"]["tags"]` only works for `/v1/chat/completions`;
-  `/v1/messages` carries metadata in `litellm_metadata` instead, and the tag
-  silently vanishes there. `async_logging_hook` runs after the spend-log snapshot
-  is built and edits `standard_logging_object["request_tags"]` directly, so it
-  works for both routes — that is why the hook sets tags there, not pre-call.
-  (The pre-call hook still stashes its classification on `metadata` for the
-  logging hook to read back.) A `spend_logs_metadata` nested dict does persist to
-  the spend row's metadata column, but it is **not** shown in the UI Tags column.
+  The UI Tags column / spend-row `request_tags` are materialized at log time.
+  A pre-call write to `data["metadata"]["tags"]` only survives on
+  `/v1/chat/completions`; `/v1/messages` carries metadata in `litellm_metadata`
+  and the tag silently vanishes. `async_logging_hook` edits
+  `standard_logging_object["request_tags"]` directly, so it works for both.
+  (A `spend_logs_metadata` dict persists to the spend-row metadata column but is
+  **not** shown in the UI Tags column.)
 - **Test both routes.** A tagging regression that hits only `/v1/messages` (the
   `claude-cli` path) is invisible if you verify only `/v1/chat/completions`.
   Confirm real client traffic with
