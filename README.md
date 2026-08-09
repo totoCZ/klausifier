@@ -23,18 +23,19 @@ name is rewritten — the request body is never modified.
 The hook runs as a LiteLLM `async_pre_call_hook`, before model-group resolution.
 It reads the requested model from `data["model"]`, the lower-cased inbound
 headers from `data["proxy_server_request"]["headers"]`, and developer/operator
-prompt text from the request body.
+prompt text from the request body. It also registers an `async_logging_hook`
+that stamps a `traffic_router:<verdict>` tag onto each spend row (see below).
 
-| Request | Signal | Destination |
-| --- | --- | --- |
-| Claude Code security monitor | `system` marker | `security` |
-| Codex Guardian policy review | `x-openai-subagent: guardian` | `security` |
-| Guardian when a proxy drops that header | Developer-prompt fallback marker | `security` |
-| Codex auto review | Client-selected `codex-auto-review` model | `security` |
-| Claude title or branch task | `system` marker | `cheap` |
-| Claude main turn or working SDK subagent | Identity marker | unchanged |
-| Codex main turn | Developer instruction identity marker | unchanged |
-| Other tier request | No recognized signal | unchanged, tagged `unknown` (metadata) |
+| Request | Signal | Destination | Tag |
+| --- | --- | --- | --- |
+| Claude Code security monitor | `system` marker | `security` | `traffic_router:security` |
+| Codex Guardian policy review | `x-openai-subagent: guardian` | `security` | `traffic_router:security` |
+| Guardian when a proxy drops that header | Developer-prompt fallback marker | `security` | `traffic_router:security` |
+| Codex auto review | Client-selected `codex-auto-review` model | `security` | `traffic_router:security` |
+| Claude title or branch task | `system` marker | `cheap` | `traffic_router:cheap` |
+| Claude main turn or working SDK subagent | Identity marker | unchanged | *(none — main)* |
+| Codex main turn | Developer instruction identity marker | unchanged | *(none — main)* |
+| Other tier request | No recognized signal | unchanged | `traffic_router:unknown` |
 
 `security` and `cheap` are virtual names that resolve via the
 `model_group_alias` in LiteLLM's `router_settings` (e.g. `security -> luna`).
@@ -66,6 +67,24 @@ Only developer/operator-authored text (`system`, `instructions`, Responses
 `input` developer messages, and `system`/`developer` roles in `messages`) is
 inspected. A user message cannot imitate an identity marker to evade routing.
 
+## Spend attribution (tags)
+
+Each non-main tier-routed request is tagged `traffic_router:<security|cheap|unknown>`
+so background and unmatched requests are distinguishable in the LiteLLM logs UI
+Tags column even when several share a session or resolve to the same underlying
+backend (e.g. `security` and `cheap` both land on `deepseek-v4-flash-low`). Main
+coding turns are deliberately left untagged — a row without a `traffic_router:` tag
+IS a main turn.
+
+The tag is stamped in `async_logging_hook`, not the pre-call hook: LiteLLM
+builds the spend row's `request_tags` list at log time from a snapshot of
+`standard_logging_object`, and the `/v1/messages` route carries request metadata
+in a different bucket (`litellm_metadata`) than `/v1/chat/completions`
+(`metadata`). Writing tags in the pre-call hook silently loses them on one of
+the two routes; the logging hook runs after that snapshot is built and edits
+`request_tags` directly, so it works for both. The pre-call hook stashes the
+classification on `metadata` and the logging hook reads it back.
+
 ## Install
 
 `traffic_router.py` lives next to the LiteLLM `config.yaml` (the config volume).
@@ -83,15 +102,9 @@ the config. Restart the proxy to pick up changes to the hook.
 
 ## Test
 
-```sh
-incus exec litellm -- /app/.venv/bin/python -c "
-import importlib.util, os
-d='/app/config'; f=os.path.join(d,'traffic_router.py')
-spec=importlib.util.spec_from_file_location('traffic_router', f)
-mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-print('loaded OK ->', mod.handler)
-"
-```
+A live end-to-end check is the only reliable verification — an import check
+does not prove routing or tagging work. See `AGENTS.md` for the deploy + test
+procedure and the SQL to confirm a tag landed in the spend row's `request_tags`.
 
 ## History
 
@@ -103,8 +116,6 @@ Responses tool-protocol downgrade (LiteLLM is expected to handle tool-protocol
 translation). The historic `unknown-<origin>` sentinel — which rerouted
 unmatched tier requests to a phantom combo purely so OmniRoute's comboName
 would record them as unknown — is replaced by a lighter LiteLLM equivalent:
-unmatched requests stay on their original combo but get a
-`metadata["spend_logs_metadata"]["traffic_router"] = "unknown"` tag that
-LiteLLM persists into the spend row (LiteLLM drops arbitrary top-level
-metadata keys; only the nested `spend_logs_metadata` dict survives), so they
+unmatched requests stay on their original combo but get a `traffic_router:unknown`
+tag in the spend row's `request_tags` (see *Spend attribution* above), so they
 are attributable as unknown without defining extra model groups.

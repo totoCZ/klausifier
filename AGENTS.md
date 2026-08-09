@@ -87,33 +87,47 @@ missing — not a hook problem.
 
 ### End-to-end test
 
+The tag must be verified on **both** ingress routes — `/v1/chat/completions`
+(OpenAI format) and `/v1/messages` (Anthropic format, used by `claude-cli`).
+They carry request metadata in different buckets, and a tagging bug that hits
+only one route is invisible if you test only the other.
+
 ```sh
 MK=$(incus exec litellm -- sh -c 'echo "$LITELLM_MASTER_KEY"')
+SYS="You are a security monitor for autonomous AI coding agents."
 
-# Plain unmatched request -> stays luna, tagged unknown.
+# /v1/chat/completions  (system goes in a system message)
 incus exec litellm -- /app/.venv/bin/python -c "
 import urllib.request, json
-body={'model':'luna','messages':[{'role':'user','content':'plain unmatched'}],'max_tokens':5}
+body={'model':'luna','messages':[{'role':'system','content':'''$SYS'''},{'role':'user','content':'x'}],'max_tokens':5}
 req=urllib.request.Request('http://[::1]:80/v1/chat/completions',
   data=json.dumps(body).encode(),
   headers={'Authorization':'Bearer $MK','Content-Type':'application/json'})
-r=urllib.request.urlopen(req,timeout=30); print('HTTP', r.status)
+print('HTTP', urllib.request.urlopen(req,timeout=30).status)
 "
 
-# Then read the spend row: model_group + the unknown tag.
+# /v1/messages  (system goes in the top-level system field)
+incus exec litellm -- /app/.venv/bin/python -c "
+import urllib.request, json
+body={'model':'luna','system':'''$SYS''','messages':[{'role':'user','content':'x'}],'max_tokens':5}
+req=urllib.request.Request('http://[::1]:80/v1/messages',
+  data=json.dumps(body).encode(),
+  headers={'Authorization':'Bearer $MK','Content-Type':'application/json'})
+print('HTTP', urllib.request.urlopen(req,timeout=30).status)
+"
+
+# Read the spend rows back: request_tags (the UI Tags column) must carry the tag.
 incus exec postgresql -- psql -U litellm -d litellm -c '
-SELECT model_group,
-       metadata->'"'"'spend_logs_metadata'"'"'->'"'"'traffic_router'"'"' AS unknown_tag
+SELECT model_group, request_tags, "startTime"
 FROM "LiteLLM_SpendLogs"
-ORDER BY "startTime" DESC LIMIT 1;'
+ORDER BY "startTime" DESC LIMIT 2;'
 ```
 
-Expected for the unmatched request above: `model_group = luna`,
-`unknown_tag = "unknown"`.
-
-To confirm the hook rewrites a matched request, send the same `luna` call with a
-`system` message beginning `You are a security monitor for autonomous AI coding
-agents.` — the spend row should show `model_group = security` and no unknown tag.
+Expected: both rows show `model_group = security` and a `request_tags` array
+containing `"traffic_router:security"`. A main turn (a `system` message
+beginning `You are Claude Code, Anthropic's official CLI`) should show
+`model_group` unchanged and **no** `traffic_router:` tag. An unmatched request
+shows `model_group` unchanged and `"traffic_router:unknown"`.
 
 ## Gotchas learned from live deploys
 
@@ -125,10 +139,21 @@ agents.` — the spend row should show `model_group = security` and no unknown t
   before restarting — keep one as a concrete group and make the other a
   `model_group_alias`. A clean-looking boot log is not proof groups loaded;
   always confirm with a live tier call.
-- **Only `metadata["spend_logs_metadata"]` is persisted to the spend row.**
-  Arbitrary top-level `data["metadata"]` keys are dropped when LiteLLM builds the
-  spend log. Any tag the hook wants visible in spend logs must nest under
-  `metadata["spend_logs_metadata"]`.
+- **Tags go in `request_tags` via `async_logging_hook`, NOT in the pre-call hook.**
+  The logs UI Tags column and the spend row's `request_tags` field are built at
+  log time from `standard_logging_object["request_tags"]`. A pre-call hook that
+  writes to `data["metadata"]["tags"]` only works for `/v1/chat/completions`;
+  `/v1/messages` carries metadata in `litellm_metadata` instead, and the tag
+  silently vanishes there. `async_logging_hook` runs after the spend-log snapshot
+  is built and edits `standard_logging_object["request_tags"]` directly, so it
+  works for both routes — that is why the hook sets tags there, not pre-call.
+  (The pre-call hook still stashes its classification on `metadata` for the
+  logging hook to read back.) A `spend_logs_metadata` nested dict does persist to
+  the spend row's metadata column, but it is **not** shown in the UI Tags column.
+- **Test both routes.** A tagging regression that hits only `/v1/messages` (the
+  `claude-cli` path) is invisible if you verify only `/v1/chat/completions`.
+  Confirm real client traffic with
+  `metadata->>'user_api_key_alias' = 'CC Switch Claude'`.
 - **The slim LiteLLM image has no `curl`/`wget`.** Use
   `/app/.venv/bin/python -c "import urllib.request; ..."` for in-container HTTP.
 - **`incus exec` does not propagate host env vars** into the container — read

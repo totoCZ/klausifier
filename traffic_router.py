@@ -7,25 +7,40 @@ hook preserved in historic/cc-background-to-luna.js. Only `data["model"]` is
 rewritten; the request body is never modified (LiteLLM handles tool-protocol
 translation itself, so the old Responses-downgrade mangling was not ported).
 
-Routing table (decision order, first match wins):
-  codex-auto-review model                       -> security
-  requested model not a tier (luna/terra/sol)   -> unchanged (direct provider IDs)
-  x-openai-subagent: guardian header            -> security
-  system/developer marker: security monitor     -> security
-  system/developer marker: guardian review      -> security   (header fallback)
-  system marker: title / branch                 -> cheap
-  system marker: known main coding turn         -> unchanged
-  anything else                                 -> unchanged, but tagged unknown
+Routing table (decision order, first match wins). Tier-routed requests that are
+NOT main coding turns are tagged `traffic_router:<security|cheap|unknown>` in
+metadata["tags"], so each kind is distinguishable in the proxy logs UI's Tags
+column even when several share one session or resolve to the same underlying
+backend (e.g. security and cheap both land on deepseek-v4-flash-low). Main coding
+turns are deliberately left untagged: a row without a traffic_router tag IS a
+main turn.
+  codex-auto-review model                       -> security   [tag: security]
+  requested model not a tier (luna/terra/sol)   -> unchanged  [not tagged]
+  x-openai-subagent: guardian header            -> security   [tag: security]
+  system/developer marker: security monitor     -> security   [tag: security]
+  system/developer marker: guardian review      -> security   [tag: security]
+  system marker: title / branch                 -> cheap      [tag: cheap]
+  system marker: known main coding turn         -> unchanged  [not tagged; main]
+  anything else                                 -> unchanged  [tag: unknown]
 
 `security` and `cheap` resolve via the model_group_alias in LiteLLM's
 router_settings (e.g. security -> luna).
+
+Tagging is two-phase: the pre-call hook classifies and rewrites the model, and
+stashes the verdict on metadata; async_logging_hook then appends
+`traffic_router:<verdict>` to the finalized standard_logging_object's
+request_tags — the field the logs UI Tags column shows. The tag is written at
+log time (not pre-call) because request_tags is materialized there regardless of
+ingress route, which makes it work for both /v1/chat/completions and
+/v1/messages. Main turns and direct model IDs are left untagged: a row without a
+traffic_router tag IS a main turn (or an un-routed direct call).
 
 Registered from config.yaml via:
   litellm_settings:
     callbacks: traffic_router.handler
 """
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from litellm.caching.dual_cache import DualCache
 from litellm.integrations.custom_logger import CustomLogger
@@ -133,6 +148,48 @@ def _get_subagent_header(data: dict) -> Optional[str]:
     return None
 
 
+def _any_in(text: str, markers) -> bool:
+    """True if any substring marker is present in text."""
+    return any(m in text for m in markers)
+
+
+_TAG_KEY = "traffic_router_classification"
+_TAG_PREFIX = "traffic_router:"
+
+
+def _stash_tag(data: dict, value: str) -> None:
+    """Stash the classification in metadata for async_logging_hook to read back.
+
+    The pre-call hook classifies the request but the tag is only MADE VISIBLE in
+    async_logging_hook (see below). We stash the verdict on both metadata buckets
+    so the logging hook can recover it no matter which bucket survives the route
+    — /v1/chat/completions keeps ``metadata``; routes in LITELLM_METADATA_ROUTES
+    (/v1/messages, /responses, ...) keep ``litellm_metadata``. This key is
+    internal scratch; it never needs to reach the spend row itself."""
+    for bucket_name in ("metadata", "litellm_metadata"):
+        bucket = data.get(bucket_name)
+        if not isinstance(bucket, dict):
+            bucket = {}
+        bucket[_TAG_KEY] = value
+        data[bucket_name] = bucket
+
+
+def _read_stashed_tag(kwargs: dict) -> Optional[str]:
+    """Recover the classification the pre-call hook stashed. Returns None if the
+    request never went through tier routing (direct model ID) or was a main turn."""
+    litellm_params = kwargs.get("litellm_params") or {}
+    for bucket_name in ("metadata", "litellm_metadata"):
+        bucket = litellm_params.get(bucket_name)
+        if isinstance(bucket, dict) and bucket.get(_TAG_KEY):
+            return bucket[_TAG_KEY]
+    # litellm_params sometimes carries the buckets flat under kwargs instead.
+    for bucket_name in ("metadata", "litellm_metadata"):
+        bucket = kwargs.get(bucket_name)
+        if isinstance(bucket, dict) and bucket.get(_TAG_KEY):
+            return bucket[_TAG_KEY]
+    return None
+
+
 class TrafficRouter(CustomLogger):
     async def async_pre_call_hook(
         self,
@@ -153,51 +210,88 @@ class TrafficRouter(CustomLogger):
         # Codex auto-review is a Guardian review subagent — route to security.
         if requested == "codex-auto-review":
             data["model"] = "security"
+            _stash_tag(data, "security")
             return data
 
         # Only tier routing models are intercepted. A direct provider model ID
-        # (e.g. "antigravity/gemini-3.1-flash-lite", "zai/glm-5.2") is left alone.
+        # (e.g. "antigravity/gemini-3.1-flash-lite", "zai/glm-5.2") is left
+        # alone, and not tagged — it is a direct, intentionally un-routed call.
         if requested not in TIER_MODELS:
             return data
 
+        # From here every non-main path is tier-routed and gets a traffic_router
+        # tag so each kind is distinguishable in spend logs. Determine the tag
+        # (and any model rewrite), then stamp it once below.
+        new_model = None
+        tag = "unknown"
+
         # Codex Guardian identifies review requests at the transport layer.
         if _get_subagent_header(data) == "guardian":
-            data["model"] = "security"
-            return data
+            new_model = "security"
+            tag = "security"
+        else:
+            prompt = _collect_prompt_text(data).lower()
 
-        prompt = _collect_prompt_text(data).lower()
-
-        # Background-task markers win over the main-turn / SDK-identity markers
-        # below. The Claude security monitor is itself an SDK subagent, so its
-        # marker must take precedence.
-        for marker in SECURITY_MARKERS:
-            if marker in prompt:
-                data["model"] = "security"
+            # Background-task markers win over the main-turn / SDK-identity
+            # markers below. The Claude security monitor is itself an SDK
+            # subagent, so its marker must take precedence.
+            if _any_in(prompt, SECURITY_MARKERS):
+                new_model = "security"
+                tag = "security"
+            elif _any_in(prompt, CHEAP_MARKERS):
+                new_model = "cheap"
+                tag = "cheap"
+            elif _any_in(prompt, MAIN_TURN_MARKERS):
+                # Recognized main coding turn — no rewrite, no tag. Main is the
+                # common/baseline case; only background and unmatched requests
+                # are tagged, so an untagged row in spend logs IS a main turn.
                 return data
-        for marker in CHEAP_MARKERS:
-            if marker in prompt:
-                data["model"] = "cheap"
-                return data
+            # else: unmatched tier request — keep it on its original combo but
+            # tag it unknown. This mirrors the historic hook's unknown-<origin>
+            # sentinel combo (same backends, recorded as unknown) without a
+            # separate model group per tier.
 
-        # Recognized main coding turn — no-op, stays on its original combo.
-        for marker in MAIN_TURN_MARKERS:
-            if marker in prompt:
-                return data
-
-        # Unmatched tier request — keep it on its original combo but tag it
-        # unknown for spend attribution. This mirrors the historic hook's
-        # unknown-<origin> sentinel combo (same backends, but recorded as
-        # unknown) without needing a separate model group per tier. LiteLLM
-        # drops arbitrary top-level metadata keys when building the spend row;
-        # only the nested `spend_logs_metadata` dict is persisted, so the tag
-        # must go there. The model_group still names the origin (luna/terra/
-        # sol) while this flags it unmatched.
-        metadata = data.get("metadata") or {}
-        spend_meta = metadata.get("spend_logs_metadata") or {}
-        spend_meta["traffic_router"] = "unknown"
-        metadata["spend_logs_metadata"] = spend_meta
-        data["metadata"] = metadata
+        if new_model is not None:
+            data["model"] = new_model
+        _stash_tag(data, tag)
         return data
+
+    async def async_logging_hook(
+        self,
+        kwargs: dict,
+        result: Any,
+        call_type: str,
+    ) -> tuple:
+        """Append `traffic_router:<verdict>` to the finalized request_tags.
+
+        This is where the tag becomes VISIBLE — in the proxy logs UI Tags column
+        and the spend-log request_tags field. It runs in async_success_handler
+        AFTER LiteLLM has built the standard_logging_object, so it can edit that
+        object's request_tags directly. Doing it here (rather than in the
+        pre-call hook) is route-independent: it works for /v1/chat/completions
+        AND /v1/messages, streaming AND non-streaming, because by this point the
+        request_tags list is already materialized on the standard_logging_object
+        regardless of which metadata bucket the ingress route used.
+
+        Returns (kwargs, result) unchanged in shape; only the stashed
+        request_tags list is extended. Any pre-existing traffic_router:* tag is
+        replaced rather than duplicated."""
+        verdict = _read_stashed_tag(kwargs)
+        if not verdict:
+            # Direct model ID, or a main coding turn — deliberately untagged.
+            return kwargs, result
+
+        slo = kwargs.get("standard_logging_object")
+        if not isinstance(slo, dict):
+            return kwargs, result
+        tags = slo.get("request_tags")
+        if not isinstance(tags, list):
+            tags = []
+            slo["request_tags"] = tags
+        tags = [t for t in tags if not (isinstance(t, str) and t.startswith(_TAG_PREFIX))]
+        tags.append(f"{_TAG_PREFIX}{verdict}")
+        slo["request_tags"] = tags
+        return kwargs, result
 
 
 # LiteLLM resolves `traffic_router.handler` to this module-level instance.
