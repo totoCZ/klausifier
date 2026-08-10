@@ -189,7 +189,7 @@ check(meta.get("model_group") == "luna",
       "logging: unmatched request's own group restored", str(meta.get("model_group")))
 
 slo, meta = logged(req("luna", SEC))
-check(meta.get("model_group") == "luna", "logging: rewritten group restored",
+check(meta.get("model_group") == "security", "logging: security group emitted for alias",
       str(meta.get("model_group")))
 
 slo, meta = logged(req("luna", SEC), existing_group="already-set")

@@ -82,14 +82,24 @@ must map each tier name to a callable `model_name`. The live config uses aliases
 ```jsonc
 // LiteLLM_Config.param_value["router_settings"]["model_group_alias"]
 {
-  "sol":      "zai/glm-5.2-max",
-  "terra":    "zai/glm-5.2",
-  "security": "cheap"
+  "security": "luna",
+  "cheap":    "luna"
 }
 ```
 
-If a tier call returns `400 Invalid model name`, the alias/group config is
-missing — not a hook problem.
+The hook rewrites security/cheap turns to the `security`/`cheap` model names and
+relies on these aliases to resolve them to `luna` — it no longer resolves the
+alias itself (removed in favor of the LiteLLM-native path). If a tier call
+returns `400 Invalid model name`, the alias/group config is missing — not a hook
+problem.
+
+**Why the aliases don't get wiped anymore:** stock LiteLLM's `/config/update`
+serializes `router_settings` with `.dict(exclude_none=True)`, but
+`model_group_alias` has a Pydantic default of `{}` (not `None`), so the empty
+default rides along on every router-settings edit and the shallow merge wipes
+the real map. A one-line in-container patch (`exclude_defaults=True`) prevents
+this — see `/root/patch/litellm/config_update_preserve_alias.patch`. Re-apply it
+after any image rebuild.
 
 Edit aliases through the proxy's own API rather than the DB — it merges,
 applies live, and writes an audit log. `model_group_alias` is replaced
@@ -99,7 +109,7 @@ wholesale, so send the complete map:
 MK=$(incus exec litellm -- sh -c 'echo "$LITELLM_MASTER_KEY"')
 incus exec litellm -- /app/.venv/bin/python -c "
 import urllib.request, json
-alias={'sol':'zai/glm-5.2-max','terra':'zai/glm-5.2','security':'cheap'}
+alias={'security':'luna','cheap':'luna'}
 req=urllib.request.Request('http://[::1]:80/config/update',
   data=json.dumps({'router_settings':{'model_group_alias':alias}}).encode(),
   headers={'Authorization':'Bearer $MK','Content-Type':'application/json'})

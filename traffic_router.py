@@ -21,8 +21,10 @@ tier slug (its auto-approval reviewer requests fully-qualified ids like
   unmatched + bare tier slug (luna/terra/sol)   -> unchanged    [tag: unknown]
   anything else (direct provider model ID)      -> unchanged    [not tagged]
 
-`security` and `cheap` resolve via the model_group_alias in LiteLLM's
-router_settings (e.g. security -> cheap).
+`security` and `cheap` are left as the requested model and resolved by LiteLLM
+via `model_group_alias` in `router_settings` (security -> luna, cheap -> luna).
+A patched `/config/update` keeps that alias map from being wiped on unrelated
+router-settings edits — see the litellm patch repo.
 
 ## Finding unmatched traffic (and why there is no sentinel model group)
 
@@ -101,14 +103,6 @@ from litellm.integrations.custom_logger import CustomLogger
 from litellm.proxy._types import UserAPIKeyAuth
 
 TIER_MODELS = ("luna", "terra", "sol", "vision")
-
-# Friendly group aliases resolved in-code (see async_pre_call_hook), so the
-# redirect never depends on LiteLLM's model_group_alias (router_settings) —
-# that config gets wiped periodically, which 400s every security/cheap request
-# on all routes. Emitting the real group here makes the redirect wipe-proof and
-# also catches clients that send these aliases directly. The verdict/tag stays
-# security/cheap, so log visibility is unchanged.
-GROUP_ALIASES = {"security": "luna", "cheap": "luna"}
 
 # Substring markers, matched against lower-cased system/instruction/developer
 # text. Order within each list is not significant; the SECURITY list is checked
@@ -621,11 +615,6 @@ class TrafficRouter(CustomLogger):
 
         if new_model is not None:
             data["model"] = new_model
-        # Resolve friendly aliases to their real model group here, so the
-        # redirect survives model_group_alias being wiped from router_settings.
-        resolved = GROUP_ALIASES.get(data.get("model") or "")
-        if resolved:
-            data["model"] = resolved
         if verdict in TAGGED_VERDICTS:
             _stash(data, _TAG_KEY, verdict)
             # Stashing itself is what costs us model_group on the
