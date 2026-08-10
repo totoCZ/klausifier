@@ -16,7 +16,8 @@ tier slug (its auto-approval reviewer requests fully-qualified ids like
   system/developer marker: security monitor     -> security     [tag: security]
   system/developer marker: guardian review      -> security     [tag: security]
   system marker: title / branch                 -> cheap        [tag: cheap]
-  system marker: known main coding turn         -> unchanged    [not tagged; main]
+  system marker: known coding agent             -> unchanged    [tag: <agent>]
+      claude / codex / hermes (see AGENT_MARKERS)
   unmatched + bare tier slug (luna/terra/sol)   -> unchanged    [tag: unknown]
   anything else (direct provider model ID)      -> unchanged    [not tagged]
 
@@ -54,9 +55,9 @@ verdict on metadata; async_logging_hook then appends `traffic_router:<verdict>`
 to the finalized standard_logging_object's request_tags — the field the logs UI
 Tags column shows. The tag is written at log time (not pre-call) because
 request_tags is materialized there regardless of ingress route, which makes it
-work for both /v1/chat/completions and /v1/messages. Main turns and direct model
-IDs are left untagged: a row without a traffic_router tag IS a main turn (or an
-un-routed direct call). Unmatched requests additionally carry
+work for both /v1/chat/completions and /v1/messages. Direct model IDs are left
+untagged: a row with NO traffic_router tag IS an un-routed direct call.
+Unmatched requests additionally carry
 `traffic_router_fp:<fp8>` — a stable fingerprint of the caller (see below) that
 tells recurring unknown agents apart in the Tags column and correlates a spend
 row with a captured recon record.
@@ -122,14 +123,41 @@ CHEAP_MARKERS = (
     "generate a concise, sentence-case title",
     "generate a short kebab-case name",
 )
-# Known main coding turns — left untouched so a real working turn never gets
-# mistaken for background. Checked after the background markers above.
-MAIN_TURN_MARKERS = (
-    "you are claude code, anthropic's official cli",
-    "you are a coding agent running in the codex cli",
-    "you are codex, an agent based on gpt-5",
-    "you are a claude agent, built on anthropic's claude agent sdk",
+# Recognized coding agents, matched against lower-cased system/instruction/
+# developer text. Each group maps to a NAMED verdict — used both as the
+# spend-log tag and (in recon.py) as the cluster label — so traffic from each
+# agent is distinguishable in the logs UI instead of collapsing into one
+# undifferentiated "main" bucket. The request is never rewritten; it is only
+# labelled. Add a group here to teach the router a new agent.
+#
+# Order across groups is not significant — an agent's prompt does not contain
+# another agent's identity sentence — but this table is checked AFTER the
+# background markers above, so the Claude security monitor (itself an SDK
+# subagent) still wins as security.
+AGENT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("claude", (
+        "you are claude code, anthropic's official cli",
+        "you are a claude agent, built on anthropic's claude agent sdk",
+    )),
+    ("codex", (
+        "you are a coding agent running in the codex cli",
+        "you are codex, an agent based on gpt-5",
+    )),
+    ("hermes", (
+        # "You run on Hermes Agent (by Nous Research)." is the framework-injected
+        # identity line and is stable across sessions — unlike the user-authored
+        # "Soul" personality above it, which changes per deployment and must not
+        # be used as a marker.
+        "you run on hermes agent (by nous research)",
+    )),
 )
+_AGENT_VERDICTS = frozenset(name for name, _ in AGENT_MARKERS)
+
+# Verdicts that get a traffic_router:<verdict> tag in spend logs. Every
+# classified request is tagged except "direct" — a bare provider model ID that
+# is intentionally un-routed. So a row with NO traffic_router tag IS a direct
+# call.
+TAGGED_VERDICTS = _AGENT_VERDICTS | {"security", "cheap", "unknown"}
 
 
 def _block_text(block) -> str:
@@ -559,11 +587,11 @@ class TrafficRouter(CustomLogger):
             return "security", "security", prompt
         if _any_in(lowered, CHEAP_MARKERS):
             return "cheap", "cheap", prompt
-        if _any_in(lowered, MAIN_TURN_MARKERS):
-            # Recognized main coding turn — no rewrite, no tag. Main is the
-            # common/baseline case; only background and unmatched requests are
-            # tagged, so an untagged row in spend logs IS a main turn.
-            return None, "main", prompt
+        for name, markers in AGENT_MARKERS:
+            if _any_in(lowered, markers):
+                # Recognized coding agent — no rewrite, but tagged with the
+                # agent's name so its traffic is distinguishable in spend logs.
+                return None, name, prompt
 
         # Nothing matched. A bare tier slug stays on its own combo and is
         # tagged unknown so the unmatched request is still discoverable.
@@ -598,7 +626,7 @@ class TrafficRouter(CustomLogger):
         resolved = GROUP_ALIASES.get(data.get("model") or "")
         if resolved:
             data["model"] = resolved
-        if verdict in ("security", "cheap", "unknown"):
+        if verdict in TAGGED_VERDICTS:
             _stash(data, _TAG_KEY, verdict)
             # Stashing itself is what costs us model_group on the
             # /v1/chat/completions path: LiteLLM's
@@ -661,7 +689,7 @@ class TrafficRouter(CustomLogger):
 
         verdict = _read_stashed(kwargs, _TAG_KEY)
         if not verdict:
-            # Direct model ID, or a main coding turn — deliberately untagged.
+            # Direct provider model ID — deliberately untagged.
             return kwargs, result
 
         tags = slo.get("request_tags")

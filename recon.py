@@ -44,7 +44,8 @@ DIM, BOLD, RED, CYAN, GREEN, YELLOW, RESET = (
 if not sys.stdout.isatty():
     DIM = BOLD = RED = CYAN = GREEN = YELLOW = RESET = ""
 
-VERDICT_COLOR = {"unknown": RED, "security": GREEN, "cheap": GREEN, "main": DIM, "direct": DIM}
+VERDICT_COLOR = {"unknown": RED, "security": GREEN, "cheap": GREEN,
+                  "claude": CYAN, "codex": CYAN, "hermes": CYAN, "direct": DIM}
 
 # Header names worth showing in the compact view — the ones that actually
 # identify a caller. Everything else is in `show`.
@@ -355,8 +356,8 @@ def main():
 
     p = sub.add_parser("on", help="arm capture")
     p.add_argument("--capture", default="unknown",
-                   help="verdicts to capture: unknown,security,cheap,main,direct or 'all' "
-                        "(default: unknown)")
+                   help="verdicts to capture: unknown,security,cheap,claude,codex,hermes,"
+                        "direct or 'all' (default: unknown)")
     p.add_argument("--max", type=int, default=50, help="max records per worker (default: 50)")
     p.add_argument("--minutes", type=float, default=30, help="auto-disarm after N minutes (default: 30)")
     p.add_argument("--max-text", type=int, default=4000, help="per-field text cap (default: 4000)")

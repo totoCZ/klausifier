@@ -83,6 +83,9 @@ def arm(**cfg):
 
 
 MAIN = "You are Claude Code, Anthropic's official CLI for Claude."
+CODEX = "You are Codex, an agent based on gpt-5. In this environment..."
+HERMES = ("# Soul\n\nYou are a playful, flirty anime waifu AI. "
+          "You run on Hermes Agent (by Nous Research). Load the hermes skill.")
 SEC = "You are a security monitor for autonomous AI coding agents."
 
 # --- classification -------------------------------------------------------
@@ -92,7 +95,9 @@ for label, data, exp_model, exp_verdict in [
      "security", "security"),
     ("security marker", req("luna", SEC), "security", "security"),
     ("cheap marker", req("terra", "Generate a concise, sentence-case title"), "cheap", "cheap"),
-    ("main turn", req("sol", MAIN), None, "main"),
+    ("claude agent", req("sol", MAIN), None, "claude"),
+    ("codex agent", req("luna", CODEX), None, "codex"),
+    ("hermes agent", req("terra", HERMES), None, "hermes"),
     ("unknown luna", req("luna", "You are Fancy New Agent v3."), None, "unknown"),
     ("unknown terra (no system)", req("terra"), None, "unknown"),
     ("unknown sol", req("sol", "blah"), None, "unknown"),
@@ -184,14 +189,23 @@ check(meta.get("model_group") == "luna",
       "logging: unmatched request's own group restored", str(meta.get("model_group")))
 
 slo, meta = logged(req("luna", SEC))
-check(meta.get("model_group") == "security", "logging: rewritten group restored",
+check(meta.get("model_group") == "luna", "logging: rewritten group restored",
       str(meta.get("model_group")))
 
 slo, meta = logged(req("luna", SEC), existing_group="already-set")
 check(meta["model_group"] == "already-set", "logging: existing model_group not overwritten")
 
 slo, _ = logged(req("luna", MAIN))
-check(slo["request_tags"] == [], "logging: main turn left untagged")
+check("traffic_router:claude" in slo["request_tags"], "logging: agent turn tagged")
+check("traffic_router:codex" in logged(req("luna", CODEX))[0]["request_tags"],
+      "logging: codex agent tagged")
+check("traffic_router:hermes" in logged(req("terra", HERMES))[0]["request_tags"],
+      "logging: hermes agent tagged")
+# An agent turn is never rewritten, so the model_group the proxy records must
+# survive — the logging hook must not treat it as something to restore.
+slo, meta = logged(req("luna", MAIN), existing_group="sol")
+check(meta["model_group"] == "sol", "logging: agent turn keeps existing model_group",
+      str(meta.get("model_group")))
 
 slo, _ = logged(req("luna", "You are Fancy New Agent v3."),
                 ["traffic_router:unknown", "traffic_router_fp:deadbeef"])
