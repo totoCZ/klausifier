@@ -99,7 +99,15 @@ from litellm.caching.dual_cache import DualCache
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.proxy._types import UserAPIKeyAuth
 
-TIER_MODELS = ("luna", "terra", "sol")
+TIER_MODELS = ("luna", "terra", "sol", "vision")
+
+# Friendly group aliases resolved in-code (see async_pre_call_hook), so the
+# redirect never depends on LiteLLM's model_group_alias (router_settings) —
+# that config gets wiped periodically, which 400s every security/cheap request
+# on all routes. Emitting the real group here makes the redirect wipe-proof and
+# also catches clients that send these aliases directly. The verdict/tag stays
+# security/cheap, so log visibility is unchanged.
+GROUP_ALIASES = {"security": "luna", "cheap": "luna"}
 
 # Substring markers, matched against lower-cased system/instruction/developer
 # text. Order within each list is not significant; the SECURITY list is checked
@@ -585,6 +593,11 @@ class TrafficRouter(CustomLogger):
 
         if new_model is not None:
             data["model"] = new_model
+        # Resolve friendly aliases to their real model group here, so the
+        # redirect survives model_group_alias being wiped from router_settings.
+        resolved = GROUP_ALIASES.get(data.get("model") or "")
+        if resolved:
+            data["model"] = resolved
         if verdict in ("security", "cheap", "unknown"):
             _stash(data, _TAG_KEY, verdict)
             # Stashing itself is what costs us model_group on the
