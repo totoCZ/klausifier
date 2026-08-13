@@ -2,10 +2,12 @@
 LLM traffic router — a LiteLLM proxy pre-call hook.
 
 A CustomLogger that rewrites which model/combo a request targets, based on
-inbound headers and system/developer prompt markers. Ported from the OmniRoute
-hook preserved in historic/cc-background-to-luna.js. Only `data["model"]` is
-rewritten; the request body is never modified (LiteLLM handles tool-protocol
-translation itself, so the old Responses-downgrade mangling was not ported).
+inbound headers and system/developer prompt markers — plus one narrowly-read
+user-message marker (Claude Code's away-summary recap). Ported from the
+OmniRoute hook preserved in historic/cc-background-to-luna.js. Only
+`data["model"]` is rewritten; the request body is never modified (LiteLLM
+handles tool-protocol translation itself, so the old Responses-downgrade
+mangling was not ported).
 
 Routing table (decision order, first match wins). Classification runs on EVERY
 request regardless of the model name sent — Codex does not always send a bare
@@ -16,6 +18,7 @@ tier slug (its auto-approval reviewer requests fully-qualified ids like
   system/developer marker: security monitor     -> security     [tag: security]
   system/developer marker: guardian review      -> security     [tag: security]
   system marker: title / branch                 -> cheap        [tag: cheap]
+  user marker: Claude Code away-summary recap   -> cheap        [tag: cheap]
   system marker: known coding agent             -> unchanged    [tag: <agent>]
       claude / codex / hermes (see AGENT_MARKERS)
   unmatched + bare tier slug (luna/terra/sol)   -> unchanged    [tag: unknown]
@@ -117,6 +120,17 @@ CHEAP_MARKERS = (
     "generate a concise, sentence-case title",
     "generate a short kebab-case name",
 )
+# Claude Code's away-summary "recap": when the user has been idle, the CLI
+# forks the whole conversation and appends one fixed user message asking for a
+# <40-word recap (verbatim from the cli binary: `xAS = "The user stepped away
+# and is coming back. Recap in under 40 words, ..."`). It carries the full
+# session context (~100k prompt tokens) for a one-sentence answer, so it goes
+# to the cheap tier. The marker lives in a USER turn — the only user-authored
+# text the router reads — because the request's system prompt is just the
+# ordinary Claude Code main prompt. Matched after the security markers and
+# before the agent identity markers; a match can only downgrade a request to
+# cheap, never escalate it, so user text spoofing it is harmless.
+RECAP_MARKER = "the user stepped away and is coming back. recap"
 # Recognized coding agents, matched against lower-cased system/instruction/
 # developer text. Each group maps to a NAMED verdict — used both as the
 # spend-log tag and (in recon.py) as the cluster label — so traffic from each
@@ -214,6 +228,32 @@ def _collect_prompt_text(data: dict) -> str:
             elif isinstance(content, list):
                 parts.extend(_block_text(c) for c in content)
 
+    return "\n".join(p for p in parts if p)
+
+
+def _collect_user_text(data: dict) -> str:
+    """Text of user-role messages only — used solely for the recap marker.
+
+    Reads string content and `text` blocks; tool_result blocks are skipped, so
+    tool output cannot carry the marker. Deliberately separate from
+    _collect_prompt_text so nothing else in the router ever sees user text."""
+    parts = []
+    messages = data.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)
+                    ):
+                        parts.append(block["text"])
     return "\n".join(p for p in parts if p)
 
 
@@ -580,6 +620,11 @@ class TrafficRouter(CustomLogger):
         if _any_in(lowered, SECURITY_MARKERS):
             return "security", "security", prompt
         if _any_in(lowered, CHEAP_MARKERS):
+            return "cheap", "cheap", prompt
+        # Claude Code away-summary recap: the marker sits in a user turn and
+        # the system prompt is the ordinary main-turn one, so it must be
+        # checked before the agent identity markers below.
+        if RECAP_MARKER in _collect_user_text(data).lower():
             return "cheap", "cheap", prompt
         for name, markers in AGENT_MARKERS:
             if _any_in(lowered, markers):

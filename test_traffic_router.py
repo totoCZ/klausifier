@@ -116,6 +116,40 @@ check(m.handler._classify(chat)[0] == "security", "classify: system as chat mess
 spoof = {"model": "luna", "messages": [{"role": "user", "content": SEC}]}
 check(m.handler._classify(spoof)[1] == "unknown", "classify: user text cannot spoof a marker")
 
+# Claude Code away-summary recap: full main-turn system prompt plus the fixed
+# recap user message -> cheap, not claude.
+RECAP = ("The user stepped away and is coming back. Recap in under 40 words, "
+         "1-2 plain sentences, no markdown. Lead with the overall goal and "
+         "current task, then the one next action.")
+recap_msgs = req("terra", MAIN, messages=[
+    {"role": "user", "content": [{"type": "text", "text": "do the thing"}]},
+    {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+    {"role": "user", "content": [{"type": "text", "text": RECAP}]},
+])
+nm, verdict, _ = m.handler._classify(recap_msgs)
+check(nm == "cheap" and verdict == "cheap", "classify: recap user block routes to cheap",
+      f"got model={nm!r} verdict={verdict!r}")
+
+# chat-completions flavor: recap as plain string user content
+recap_chat = {"model": "luna", "messages": [
+    {"role": "system", "content": MAIN},
+    {"role": "user", "content": RECAP}]}
+check(m.handler._classify(recap_chat)[1] == "cheap", "classify: recap string content routes to cheap")
+
+# the marker inside a tool_result block must not trigger — tool output is not
+# user-authored text
+recap_tool = req("terra", MAIN, messages=[
+    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                  "content": RECAP}]},
+])
+check(m.handler._classify(recap_tool)[1] == "claude",
+      "classify: recap in tool_result does not trigger",
+      m.handler._classify(recap_tool)[1])
+
+# an ordinary main turn with normal user text stays untouched
+check(m.handler._classify(req("terra", MAIN))[1] == "claude",
+      "classify: plain main turn not mistaken for recap")
+
 # --- fingerprinting -------------------------------------------------------
 f1 = m._fingerprint("You are Fancy New Agent v3.\nCwd: /a\nToday is 2026-08-09.",
                     req("luna", headers={"user-agent": "newagent/1.2.3"}))
@@ -190,6 +224,13 @@ check(meta.get("model_group") == "luna",
 
 slo, meta = logged(req("luna", SEC))
 check(meta.get("model_group") == "security", "logging: security group emitted for alias",
+      str(meta.get("model_group")))
+
+recap_log = req("terra", MAIN, messages=[{"role": "user", "content": RECAP}])
+slo, meta = logged(recap_log)
+check("traffic_router:cheap" in slo["request_tags"], "logging: recap tagged cheap",
+      str(slo["request_tags"]))
+check(meta.get("model_group") == "cheap", "logging: recap group restored after rewrite",
       str(meta.get("model_group")))
 
 slo, meta = logged(req("luna", SEC), existing_group="already-set")
